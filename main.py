@@ -78,7 +78,7 @@ async def run_bot():
         engine.scan_watchlist,
         CronTrigger(
             day_of_week="mon-fri",
-            hour="9-15",
+            hour="9-16",
             minute=f"*/{scan_interval}",
             timezone=config["schedule"]["timezone"],
         ),
@@ -142,6 +142,13 @@ async def run_bot():
 
     scheduler.start()
     logger.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
+
+    # Run an immediate scan on startup so we don't wait for the next scheduled tick
+    logger.info("Running initial watchlist scan...")
+    try:
+        await engine.scan_watchlist()
+    except Exception as e:
+        logger.error("Initial scan failed: %s", e)
 
     # Run Telegram bot
     try:
