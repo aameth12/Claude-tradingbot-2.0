@@ -19,12 +19,6 @@ import subprocess
 import sys
 from datetime import datetime
 
-# ib_insync's sync methods (qualifyContracts, placeOrder, etc.) internally
-# run the event loop, which fails if asyncio already has a loop running.
-# nest_asyncio patches asyncio to allow nested event loop calls.
-import nest_asyncio
-nest_asyncio.apply()
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 

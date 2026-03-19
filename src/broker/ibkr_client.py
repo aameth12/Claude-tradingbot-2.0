@@ -11,7 +11,12 @@ logger = setup_logger("broker")
 
 
 class IBKRClient:
-    """Interactive Brokers client using ib_insync for order management."""
+    """Interactive Brokers client using ib_insync for order management.
+
+    Uses async versions of ib_insync methods (qualifyContractsAsync,
+    reqHistoricalDataAsync) to avoid 'event loop already running' errors
+    when combined with asyncio-based telegram bot and scheduler.
+    """
 
     def __init__(self):
         self.ib = IB()
@@ -51,7 +56,7 @@ class IBKRClient:
     async def get_market_data(self, symbol: str) -> dict:
         self._ensure_connected()
         contract = self.create_stock_contract(symbol)
-        self.ib.qualifyContracts(contract)
+        await self.ib.qualifyContractsAsync(contract)
         ticker = self.ib.reqMktData(contract, genericTickList="", snapshot=True)
         await asyncio.sleep(2)  # wait for data
         self.ib.cancelMktData(contract)
@@ -75,8 +80,8 @@ class IBKRClient:
     ) -> list[dict]:
         self._ensure_connected()
         contract = self.create_stock_contract(symbol)
-        self.ib.qualifyContracts(contract)
-        bars = self.ib.reqHistoricalData(
+        await self.ib.qualifyContractsAsync(contract)
+        bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
             durationStr=duration,
@@ -94,7 +99,7 @@ class IBKRClient:
                 "close": bar.close,
                 "volume": bar.volume,
             }
-            for bar in bars
+            for bar in (bars or [])
         ]
 
     async def place_market_order(
@@ -102,7 +107,7 @@ class IBKRClient:
     ) -> IBTrade:
         self._ensure_connected()
         contract = self.create_stock_contract(symbol)
-        self.ib.qualifyContracts(contract)
+        await self.ib.qualifyContractsAsync(contract)
         order = MarketOrder(action, quantity)
         trade = self.ib.placeOrder(contract, order)
         logger.info("Market order placed: %s %s %s shares", action, symbol, quantity)
@@ -120,7 +125,7 @@ class IBKRClient:
         """Place a bracket order: entry + stop loss + take profit."""
         self._ensure_connected()
         contract = self.create_stock_contract(symbol)
-        self.ib.qualifyContracts(contract)
+        await self.ib.qualifyContractsAsync(contract)
 
         bracket = self.ib.bracketOrder(
             action=action,
@@ -151,7 +156,7 @@ class IBKRClient:
         """Place a trailing stop order."""
         self._ensure_connected()
         contract = self.create_stock_contract(symbol)
-        self.ib.qualifyContracts(contract)
+        await self.ib.qualifyContractsAsync(contract)
 
         # Reverse action for the stop (if we bought, trailing stop sells)
         stop_action = "SELL" if action == "BUY" else "BUY"
