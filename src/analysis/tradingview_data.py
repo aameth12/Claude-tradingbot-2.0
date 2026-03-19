@@ -7,7 +7,8 @@ import yfinance as yf
 import pandas as pd
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.trend import MACD, EMAIndicator, SMAIndicator, ADXIndicator
-from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volatility import BollingerBands, AverageTrueRange, KeltnerChannel
+from ta.volume import OnBalanceVolumeIndicator, MFIIndicator
 
 from src.utils.logger import setup_logger
 from src.utils.config import get_config
@@ -109,11 +110,53 @@ def _compute_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         else:
             df[f"sma{period}"] = None
 
+    # --- NEW INDICATORS ---
+
+    # MACD Histogram (momentum divergence)
+    df["macd_histogram"] = macd.macd_diff()
+
+    # Volume SMA for confirmation
+    vol_sma_period = config.get("volume", {}).get("sma_period", 20)
+    if len(df) >= vol_sma_period:
+        df["volume_sma20"] = SMAIndicator(df["volume"].astype(float), window=vol_sma_period).sma_indicator()
+    else:
+        df["volume_sma20"] = None
+
+    # On-Balance Volume (OBV) — volume-based momentum
+    df["obv"] = OnBalanceVolumeIndicator(df["close"], df["volume"]).on_balance_volume()
+    # OBV trend: EMA5 vs EMA20 of OBV
+    if len(df) >= 20:
+        df["obv_ema5"] = EMAIndicator(df["obv"], window=5).ema_indicator()
+        df["obv_ema20"] = EMAIndicator(df["obv"], window=20).ema_indicator()
+    else:
+        df["obv_ema5"] = None
+        df["obv_ema20"] = None
+
+    # Money Flow Index (MFI) — volume-weighted RSI
+    if len(df) >= 14:
+        df["mfi"] = MFIIndicator(df["high"], df["low"], df["close"], df["volume"], window=14).money_flow_index()
+    else:
+        df["mfi"] = None
+
+    # Keltner Channels — ATR-based volatility bands (trend-following)
+    if len(df) >= 20:
+        kc = KeltnerChannel(df["high"], df["low"], df["close"], window=20, window_atr=10)
+        df["keltner_upper"] = kc.keltner_channel_hband()
+        df["keltner_lower"] = kc.keltner_channel_lband()
+    else:
+        df["keltner_upper"] = None
+        df["keltner_lower"] = None
+
     return df
 
 
 def _generate_recommendation(df: pd.DataFrame, config: dict | None = None) -> str:
-    """Generate BUY/SELL/NEUTRAL recommendation from latest indicators."""
+    """Generate BUY/SELL/NEUTRAL recommendation from latest indicators.
+
+    Uses RSI, MACD + histogram, EMA trend, Stochastic, Bollinger Bands,
+    MFI, OBV trend, and Keltner Channels. Requires >= 40% indicator
+    agreement for a signal (tighter than before).
+    """
     if df.empty or len(df) < 2:
         return "NEUTRAL"
 
@@ -123,8 +166,8 @@ def _generate_recommendation(df: pd.DataFrame, config: dict | None = None) -> st
     total = 0
 
     # RSI — use config thresholds if available
-    oversold = config["rsi"]["oversold"] if config else 35
-    overbought = config["rsi"]["overbought"] if config else 65
+    oversold = config["rsi"]["oversold"] if config else 30
+    overbought = config["rsi"]["overbought"] if config else 70
     if pd.notna(last.get("rsi")):
         total += 1
         if last["rsi"] < oversold:
@@ -132,12 +175,20 @@ def _generate_recommendation(df: pd.DataFrame, config: dict | None = None) -> st
         elif last["rsi"] > overbought:
             sell_signals += 1
 
-    # MACD
+    # MACD crossover
     if pd.notna(last.get("macd")) and pd.notna(last.get("macd_signal")):
         total += 1
         if last["macd"] > last["macd_signal"]:
             buy_signals += 1
         else:
+            sell_signals += 1
+
+    # MACD Histogram — momentum confirmation
+    if pd.notna(last.get("macd_histogram")):
+        total += 1
+        if last["macd_histogram"] > 0:
+            buy_signals += 1
+        elif last["macd_histogram"] < 0:
             sell_signals += 1
 
     # EMA trend — single consolidated vote based on majority of EMAs
@@ -174,17 +225,48 @@ def _generate_recommendation(df: pd.DataFrame, config: dict | None = None) -> st
         elif last["close"] >= last["bb_upper"]:
             sell_signals += 1
 
+    # MFI (volume-weighted RSI) — institutional buying/selling
+    if pd.notna(last.get("mfi")):
+        total += 1
+        if last["mfi"] < 20:
+            buy_signals += 1
+        elif last["mfi"] > 80:
+            sell_signals += 1
+
+    # OBV trend — volume confirms price direction
+    if pd.notna(last.get("obv_ema5")) and pd.notna(last.get("obv_ema20")):
+        total += 1
+        if last["obv_ema5"] > last["obv_ema20"]:
+            buy_signals += 1
+        elif last["obv_ema5"] < last["obv_ema20"]:
+            sell_signals += 1
+
+    # Keltner Channels — trend-following breakout
+    if pd.notna(last.get("keltner_upper")) and pd.notna(last.get("keltner_lower")):
+        total += 1
+        if last["close"] > last["keltner_upper"]:
+            buy_signals += 1  # Breakout above = strong uptrend
+        elif last["close"] < last["keltner_lower"]:
+            sell_signals += 1  # Breakdown below = strong downtrend
+
+    # Volume confirmation — reduce signal strength on low volume
+    if pd.notna(last.get("volume")) and pd.notna(last.get("volume_sma20")):
+        if last["volume_sma20"] > 0 and last["volume"] < last["volume_sma20"]:
+            # Low volume: don't add to buy/sell, effectively penalizes
+            total += 1  # Counts as neutral (no buy/sell increment)
+
     if total == 0:
         return "NEUTRAL"
 
     ratio = (buy_signals - sell_signals) / total
+    # Tighter thresholds: require 40% agreement (was 20%)
     if ratio >= 0.6:
         return "STRONG_BUY"
-    elif ratio >= 0.2:
+    elif ratio >= 0.4:
         return "BUY"
     elif ratio <= -0.6:
         return "STRONG_SELL"
-    elif ratio <= -0.2:
+    elif ratio <= -0.4:
         return "SELL"
     return "NEUTRAL"
 
@@ -294,11 +376,19 @@ class TradingViewAnalyzer:
                     "rsi": _safe_float(last.get("rsi")),
                     "macd": _safe_float(last.get("macd")),
                     "macd_signal": _safe_float(last.get("macd_signal")),
+                    "macd_histogram": _safe_float(last.get("macd_histogram")),
                     "bb_upper": _safe_float(last.get("bb_upper")),
                     "bb_lower": _safe_float(last.get("bb_lower")),
                     "atr": _safe_float(last.get("atr")),
                     "adx": _safe_float(last.get("adx")),
                     "volume": _safe_float(last.get("volume")),
+                    "volume_sma20": _safe_float(last.get("volume_sma20")),
+                    "obv": _safe_float(last.get("obv")),
+                    "obv_ema5": _safe_float(last.get("obv_ema5")),
+                    "obv_ema20": _safe_float(last.get("obv_ema20")),
+                    "mfi": _safe_float(last.get("mfi")),
+                    "keltner_upper": _safe_float(last.get("keltner_upper")),
+                    "keltner_lower": _safe_float(last.get("keltner_lower")),
                     "close": _safe_float(last.get("close")),
                     "open": _safe_float(last.get("open")),
                     "high": _safe_float(last.get("high")),
@@ -382,6 +472,44 @@ class TradingViewAnalyzer:
                 signals.append({"indicator": "EMA_CROSS", "signal": "BUY", "value": ema_short, "reason": "EMA10 > EMA20"})
             else:
                 signals.append({"indicator": "EMA_CROSS", "signal": "SELL", "value": ema_short, "reason": "EMA10 < EMA20"})
+
+        # MACD Histogram — momentum direction
+        macd_hist = indicators.get("macd_histogram")
+        if macd_hist is not None:
+            if macd_hist > 0:
+                signals.append({"indicator": "MACD_HIST", "signal": "BUY", "value": macd_hist, "reason": "Positive histogram"})
+            elif macd_hist < 0:
+                signals.append({"indicator": "MACD_HIST", "signal": "SELL", "value": macd_hist, "reason": "Negative histogram"})
+
+        # MFI — volume-weighted RSI (institutional flow)
+        mfi = indicators.get("mfi")
+        if mfi is not None:
+            if mfi < 20:
+                signals.append({"indicator": "MFI", "signal": "BUY", "value": mfi, "reason": "MFI oversold"})
+            elif mfi > 80:
+                signals.append({"indicator": "MFI", "signal": "SELL", "value": mfi, "reason": "MFI overbought"})
+            else:
+                signals.append({"indicator": "MFI", "signal": "NEUTRAL", "value": mfi, "reason": "MFI normal"})
+
+        # OBV trend — volume confirms price direction
+        obv_ema5 = indicators.get("obv_ema5")
+        obv_ema20 = indicators.get("obv_ema20")
+        if obv_ema5 is not None and obv_ema20 is not None:
+            if obv_ema5 > obv_ema20:
+                signals.append({"indicator": "OBV", "signal": "BUY", "value": obv_ema5, "reason": "OBV rising"})
+            else:
+                signals.append({"indicator": "OBV", "signal": "SELL", "value": obv_ema5, "reason": "OBV falling"})
+
+        # Keltner Channels — trend breakout
+        kc_upper = indicators.get("keltner_upper")
+        kc_lower = indicators.get("keltner_lower")
+        if close is not None and kc_upper is not None and kc_lower is not None:
+            if close > kc_upper:
+                signals.append({"indicator": "KELTNER", "signal": "BUY", "value": close, "reason": "Above upper Keltner"})
+            elif close < kc_lower:
+                signals.append({"indicator": "KELTNER", "signal": "SELL", "value": close, "reason": "Below lower Keltner"})
+            else:
+                signals.append({"indicator": "KELTNER", "signal": "NEUTRAL", "value": close, "reason": "Within Keltner"})
 
         buy_count = sum(1 for s in signals if s["signal"] == "BUY")
         sell_count = sum(1 for s in signals if s["signal"] == "SELL")

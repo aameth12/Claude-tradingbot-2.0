@@ -184,55 +184,78 @@ class TradingEngine:
         return signal
 
     async def execute_signal(self, signal: TradeSignal):
-        """Execute a trade signal through the broker."""
+        """Execute a trade signal through the broker.
+
+        Uses market order for immediate entry, then places SL/TP only after
+        entry is confirmed filled. Recalculates SL/TP from actual fill price.
+        """
         logger.info("Executing signal: %s %s", signal.side, signal.symbol)
 
         action = "BUY" if signal.side == "LONG" else "SELL"
+        exit_action = "SELL" if action == "BUY" else "BUY"
 
         try:
-            # Place bracket order (entry + SL + TP)
-            trades = await self.broker.place_bracket_order(
+            # 1. Market entry — wait for fill
+            entry_trade, fill_price = await self.broker.place_entry_order(
                 symbol=signal.symbol,
                 action=action,
                 quantity=signal.quantity,
-                limit_price=signal.entry_price,
-                stop_loss_price=signal.stop_loss,
-                take_profit_price=signal.take_profit,
             )
 
-            # Record trade in database
+            # 2. Recalculate SL/TP from actual fill price (not stale analysis price)
+            atr = abs(signal.take_profit - signal.entry_price) / self.config["risk"]["take_profit"]["atr_multiplier"]
+            trade_levels = self.risk_manager.get_trade_levels(
+                fill_price, atr, signal.side,
+                self._cached_portfolio_value or 100000,
+            )
+            stop_loss = trade_levels["stop_loss"]
+            take_profit = trade_levels["take_profit"]
+
+            # 3. Place SL/TP only after entry is confirmed
+            tp_trade, sl_trade = await self.broker.place_exit_orders(
+                symbol=signal.symbol,
+                exit_action=exit_action,
+                quantity=signal.quantity,
+                stop_loss_price=stop_loss,
+                take_profit_price=take_profit,
+            )
+
+            # Record trade in database with actual fill price
             session = get_session()
             try:
                 db_trade = Trade(
                     symbol=signal.symbol,
                     side=signal.side,
-                    entry_price=signal.entry_price,
+                    entry_price=fill_price,
                     quantity=signal.quantity,
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
                     status="OPEN",
                     strategy=signal.strategy,
                     timeframe=signal.timeframe,
                     signals=json.dumps(signal.signals_detail),
-                    order_id=trades[0].order.orderId if trades else None,
+                    order_id=sl_trade.order.orderId,
                 )
                 session.add(db_trade)
                 session.commit()
-                logger.info("Trade recorded in DB: %s %s", signal.side, signal.symbol)
+                logger.info(
+                    "Trade recorded in DB: %s %s | fill=%.2f | SL=%.2f | TP=%.2f",
+                    signal.side, signal.symbol, fill_price, stop_loss, take_profit,
+                )
             finally:
                 session.close()
 
             # Initialize price tracking for trailing stop
-            self._price_extremes[signal.symbol] = signal.entry_price
+            self._price_extremes[signal.symbol] = fill_price
 
             # Send Telegram alert
             if self.telegram_bot:
                 await self.telegram_bot.send_trade_alert({
                     "side": signal.side,
                     "symbol": signal.symbol,
-                    "entry_price": signal.entry_price,
-                    "stop_loss": signal.stop_loss,
-                    "take_profit": signal.take_profit,
+                    "entry_price": fill_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
                     "quantity": signal.quantity,
                     "confidence": signal.confidence,
                 })
@@ -266,13 +289,22 @@ class TradingEngine:
                         extreme = min(extreme, current_price)
                     self._price_extremes[trade.symbol] = extreme
 
-                    # Calculate new trailing stop
+                    # Get ATR for volatility-adaptive trailing stop
+                    atr = None
+                    try:
+                        tv_analysis = self.tv_analyzer.get_analysis(trade.symbol, "1h")
+                        atr = tv_analysis.get("indicators", {}).get("atr")
+                    except Exception:
+                        pass
+
+                    # Calculate new trailing stop (ATR-based if available)
                     new_sl = self.risk_manager.calculate_trailing_stop(
                         entry_price=trade.entry_price,
                         current_price=current_price,
                         current_stop=trade.stop_loss,
                         highest_price=extreme,
                         side=trade.side,
+                        atr=atr,
                     )
 
                     # Only update if the change is meaningful (>$0.10)
@@ -295,7 +327,11 @@ class TradingEngine:
             session.close()
 
     async def check_closed_positions(self):
-        """Check broker for filled orders and update trade records."""
+        """Check broker for filled orders and update trade records.
+
+        Uses actual broker fill prices instead of stale market data for
+        accurate P&L calculation. Tracks exit reason (SL/TP/trailing).
+        """
         session = get_session()
         try:
             open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
@@ -304,9 +340,22 @@ class TradingEngine:
 
             for trade in open_trades:
                 if trade.symbol not in position_symbols:
-                    # Position was closed (SL or TP hit)
-                    market_data = await self.broker.get_market_data(trade.symbol)
-                    exit_price = market_data.get("last") or trade.entry_price
+                    # Position was closed — get actual fill price from broker
+                    exit_price = None
+                    try:
+                        fills = await self.broker.get_recent_fills(trade.symbol)
+                        # Find the exit fill (opposite side of entry)
+                        exit_side = "SLD" if trade.side == "LONG" else "BOT"
+                        exit_fills = [f for f in fills if f["side"] == exit_side]
+                        if exit_fills:
+                            exit_price = exit_fills[-1]["price"]
+                    except Exception as e:
+                        logger.warning("Could not get fills for %s: %s", trade.symbol, e)
+
+                    # Fallback to market data if fills unavailable
+                    if not exit_price:
+                        market_data = await self.broker.get_market_data(trade.symbol)
+                        exit_price = market_data.get("last") or trade.entry_price
 
                     if trade.side == "LONG":
                         pnl = (exit_price - trade.entry_price) * trade.quantity
@@ -315,22 +364,26 @@ class TradingEngine:
 
                     pnl_pct = (pnl / (trade.entry_price * trade.quantity)) * 100
 
+                    # Determine exit reason from price proximity to SL/TP
+                    exit_reason = self._infer_exit_reason(trade, exit_price)
+
                     trade.exit_price = exit_price
                     trade.exit_time = datetime.utcnow()
                     trade.pnl = round(pnl, 2)
                     trade.pnl_pct = round(pnl_pct, 2)
                     trade.status = "CLOSED"
+                    trade.exit_reason = exit_reason
                     session.commit()
 
                     logger.info(
-                        "Trade closed: %s %s | PnL: $%.2f (%.2f%%)",
-                        trade.side, trade.symbol, pnl, pnl_pct,
+                        "Trade closed: %s %s | PnL: $%.2f (%.2f%%) | reason: %s",
+                        trade.side, trade.symbol, pnl, pnl_pct, exit_reason,
                     )
 
                     # Notify via Telegram
                     if self.telegram_bot:
                         msg = (
-                            f"TRADE CLOSED\n"
+                            f"TRADE CLOSED ({exit_reason})\n"
                             f"{trade.side} {trade.symbol}\n"
                             f"Entry: ${trade.entry_price:.2f} -> Exit: ${exit_price:.2f}\n"
                             f"P&L: ${pnl:+,.2f} ({pnl_pct:+.2f}%)"
@@ -342,6 +395,25 @@ class TradingEngine:
 
         finally:
             session.close()
+
+    @staticmethod
+    def _infer_exit_reason(trade: Trade, exit_price: float) -> str:
+        """Infer why a trade was closed based on exit price vs SL/TP levels."""
+        sl_tolerance = abs(trade.stop_loss * 0.005)  # 0.5% tolerance
+        tp_tolerance = abs(trade.take_profit * 0.005)
+
+        if trade.side == "LONG":
+            if exit_price <= trade.stop_loss + sl_tolerance:
+                return "SL_HIT"
+            if exit_price >= trade.take_profit - tp_tolerance:
+                return "TP_HIT"
+        else:  # SHORT
+            if exit_price >= trade.stop_loss - sl_tolerance:
+                return "SL_HIT"
+            if exit_price <= trade.take_profit + tp_tolerance:
+                return "TP_HIT"
+
+        return "TRAILING_STOP"
 
     async def generate_daily_summary(self):
         """Generate and store daily trading summary."""

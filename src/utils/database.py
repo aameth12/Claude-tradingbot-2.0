@@ -32,6 +32,7 @@ class Trade(Base):
     timeframe = Column(String(10), nullable=True)
     signals = Column(Text, nullable=True)  # JSON of signals that triggered the trade
     order_id = Column(Integer, nullable=True)  # IBKR order ID
+    exit_reason = Column(String(20), nullable=True)  # SL_HIT, TP_HIT, TRAILING_STOP, MANUAL
     notes = Column(Text, nullable=True)
 
 
@@ -71,6 +72,15 @@ class BacktestResult(Base):
 
 def init_db():
     Base.metadata.create_all(engine)
+    # Migrate existing tables: add exit_reason column if missing
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    if "trades" in insp.get_table_names():
+        columns = [c["name"] for c in insp.get_columns("trades")]
+        if "exit_reason" not in columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE trades ADD COLUMN exit_reason VARCHAR(20)"))
+                conn.commit()
 
 
 def get_session():

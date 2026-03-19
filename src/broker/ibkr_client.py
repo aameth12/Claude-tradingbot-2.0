@@ -149,40 +149,58 @@ class IBKRClient:
         logger.info("Market order placed: %s %s %s shares", action, symbol, quantity)
         return trade
 
-    async def place_bracket_order(
+    async def place_entry_order(
         self,
         symbol: str,
         action: str,
         quantity: int,
-        limit_price: float,
-        stop_loss_price: float,
-        take_profit_price: float,
-    ) -> list[IBTrade]:
-        """Place entry + exit orders for a trade.
+        timeout: int = 10,
+    ) -> tuple[IBTrade, float]:
+        """Place a market entry order and wait for fill confirmation.
 
-        Uses individual orders instead of ib_insync bracket orders to
-        avoid Error 135 in paper trading. Entry is a limit order; SL and
-        TP are placed as an OCA group so one cancels the other.
+        Returns (trade, fill_price). Raises RuntimeError if not filled.
         """
         self._ensure_connected()
         contract = await self._get_qualified_contract(symbol)
+        order = MarketOrder(action, quantity)
+        trade = self.ib.placeOrder(contract, order)
 
-        exit_action = "BUY" if action == "SELL" else "SELL"
+        # Wait for fill (poll every 0.5s)
+        for _ in range(timeout * 2):
+            await asyncio.sleep(0.5)
+            if trade.orderStatus.status == "Filled":
+                fill_price = trade.orderStatus.avgFillPrice
+                logger.info(
+                    "Entry filled: %s %s | qty=%s | fill=%.2f",
+                    action, symbol, quantity, fill_price,
+                )
+                return trade, fill_price
+
+        # Not filled — cancel and raise
+        self.ib.cancelOrder(trade.order)
+        raise RuntimeError(f"Entry order not filled within {timeout}s for {symbol}")
+
+    async def place_exit_orders(
+        self,
+        symbol: str,
+        exit_action: str,
+        quantity: int,
+        stop_loss_price: float,
+        take_profit_price: float,
+    ) -> tuple[IBTrade, IBTrade]:
+        """Place SL + TP as an OCA group. Call only after entry is filled."""
+        self._ensure_connected()
+        contract = await self._get_qualified_contract(symbol)
         oca_group = f"OCA_{symbol}_{self.ib.client.getReqId()}"
 
-        # 1. Entry limit order (DAY = valid for current session)
-        entry_order = LimitOrder(action, quantity, limit_price)
-        entry_order.tif = "DAY"
-        entry_trade = self.ib.placeOrder(contract, entry_order)
-
-        # 2. Take profit limit order (OCA group, GTC = good till cancelled)
+        # Take profit limit order (GTC)
         tp_order = LimitOrder(exit_action, quantity, take_profit_price)
         tp_order.ocaGroup = oca_group
-        tp_order.ocaType = 1  # Cancel other orders in group
+        tp_order.ocaType = 1
         tp_order.tif = "GTC"
         tp_trade = self.ib.placeOrder(contract, tp_order)
 
-        # 3. Stop loss order (OCA group, GTC)
+        # Stop loss order (GTC)
         sl_order = StopOrder(exit_action, quantity, stop_loss_price)
         sl_order.ocaGroup = oca_group
         sl_order.ocaType = 1
@@ -192,9 +210,36 @@ class IBKRClient:
         await asyncio.sleep(0.5)
 
         logger.info(
-            "Orders placed: %s %s | qty=%s | entry=%.2f | SL=%.2f | TP=%.2f | OCA=%s",
-            action, symbol, quantity, limit_price, stop_loss_price, take_profit_price,
+            "Exit orders placed: %s %s | qty=%s | SL=%.2f | TP=%.2f | OCA=%s",
+            exit_action, symbol, quantity, stop_loss_price, take_profit_price,
             oca_group,
+        )
+        return tp_trade, sl_trade
+
+    async def place_bracket_order(
+        self,
+        symbol: str,
+        action: str,
+        quantity: int,
+        limit_price: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+    ) -> list[IBTrade]:
+        """Place entry + exit orders using market entry + OCA exit group.
+
+        Entry uses a market order for immediate fill, then SL/TP are placed
+        only after entry is confirmed. This prevents orphan SL/TP orders.
+        """
+        entry_trade, fill_price = await self.place_entry_order(symbol, action, quantity)
+
+        exit_action = "BUY" if action == "SELL" else "SELL"
+        tp_trade, sl_trade = await self.place_exit_orders(
+            symbol, exit_action, quantity, stop_loss_price, take_profit_price,
+        )
+
+        logger.info(
+            "Bracket complete: %s %s | qty=%s | fill=%.2f | SL=%.2f | TP=%.2f",
+            action, symbol, quantity, fill_price, stop_loss_price, take_profit_price,
         )
         return [entry_trade, tp_trade, sl_trade]
 
@@ -284,6 +329,22 @@ class IBKRClient:
             logger.info("Cancelled %d stale orders", cancelled)
             await asyncio.sleep(0.5)  # Let cancellations propagate
         return cancelled
+
+    async def get_recent_fills(self, symbol: str) -> list[dict]:
+        """Get recent execution fills for a symbol."""
+        self._ensure_connected()
+        fills = self.ib.fills()
+        return [
+            {
+                "symbol": f.contract.symbol,
+                "price": f.execution.avgPrice,
+                "quantity": f.execution.shares,
+                "side": f.execution.side,
+                "time": f.execution.time,
+                "order_id": f.execution.orderId,
+            }
+            for f in fills if f.contract.symbol == symbol
+        ]
 
     async def get_positions(self) -> list[dict]:
         self._ensure_connected()

@@ -18,7 +18,7 @@ watchlist:
 # --- Trading Parameters ---
 trading:
   mode: paper                    # paper or live
-  max_position_size: 1000        # max dollars per position
+  max_position_size: 5000        # max dollars per position (was 1000)
   max_daily_trades: 0            # 0 = unlimited trades per day
   max_open_positions: 10         # max concurrent positions
   min_volume: 500000             # minimum avg daily volume
@@ -55,8 +55,8 @@ timeframes:
 indicators:
   rsi:
     period: 14
-    overbought: 65
-    oversold: 35
+    overbought: 70               # standard RSI levels (was 65)
+    oversold: 30                 # standard RSI levels (was 35)
   macd:
     fast: 12
     slow: 26
@@ -75,7 +75,7 @@ indicators:
 ai:
   model: "claude-sonnet-4-20250514"
   chart_analysis_enabled: true
-  confidence_threshold: 0.45     # min AI confidence to take a trade
+  confidence_threshold: 0.60     # min confidence to take a trade (was 0.45)
 
 # --- Schedule ---
 schedule:

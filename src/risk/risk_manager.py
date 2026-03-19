@@ -83,33 +83,55 @@ class RiskManager:
         current_stop: float,
         highest_price: float,
         side: str,
+        atr: float | None = None,
     ) -> float:
-        """Calculate new trailing stop loss level."""
+        """Calculate new trailing stop loss level.
+
+        If ATR is provided, uses ATR-based trailing (adapts to volatility):
+          - Activates after profit exceeds 1.5x ATR
+          - Trails 1x ATR from the high/low
+        Otherwise falls back to percentage-based trailing from config.
+        """
         ts_config = self.config["trailing_stop"]
         if not ts_config["enabled"]:
             return current_stop
 
+        # ATR-based trailing (preferred — adapts to each stock's volatility)
+        if atr and atr > 0:
+            if side == "LONG":
+                profit = current_price - entry_price
+                if profit >= atr * 1.5:
+                    new_stop = highest_price - atr
+                    if new_stop > current_stop:
+                        logger.info(
+                            "ATR trailing stop: %.2f -> %.2f (high: %.2f, ATR: %.2f)",
+                            current_stop, new_stop, highest_price, atr,
+                        )
+                        return round(new_stop, 2)
+            else:  # SHORT
+                profit = entry_price - current_price
+                if profit >= atr * 1.5:
+                    new_stop = highest_price + atr
+                    if new_stop < current_stop:
+                        logger.info(
+                            "ATR trailing stop: %.2f -> %.2f (low: %.2f, ATR: %.2f)",
+                            current_stop, new_stop, highest_price, atr,
+                        )
+                        return round(new_stop, 2)
+            return current_stop
+
+        # Percentage-based fallback
         if side == "LONG":
             profit_pct = ((current_price - entry_price) / entry_price) * 100
             if profit_pct >= ts_config["activation_pct"]:
-                # Trail from the highest price seen
                 new_stop = highest_price * (1 - ts_config["trail_pct"] / 100)
                 if new_stop > current_stop:
-                    logger.info(
-                        "Trailing stop updated: %.2f -> %.2f (highest: %.2f)",
-                        current_stop, new_stop, highest_price,
-                    )
                     return round(new_stop, 2)
         else:  # SHORT
             profit_pct = ((entry_price - current_price) / entry_price) * 100
             if profit_pct >= ts_config["activation_pct"]:
-                # For shorts, trail from the lowest price seen (highest_price stores lowest)
                 new_stop = highest_price * (1 + ts_config["trail_pct"] / 100)
                 if new_stop < current_stop:
-                    logger.info(
-                        "Trailing stop updated: %.2f -> %.2f (lowest: %.2f)",
-                        current_stop, new_stop, highest_price,
-                    )
                     return round(new_stop, 2)
 
         return current_stop

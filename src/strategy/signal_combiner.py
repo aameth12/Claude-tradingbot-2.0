@@ -31,11 +31,12 @@ class SignalCombiner:
         self.config = get_config()
         self.confidence_threshold = self.config["ai"]["confidence_threshold"]
         # Weights for different signal sources
+        # Multi-timeframe is most reliable; AI is least reliable
         self.weights = {
             "tradingview_summary": 0.25,
             "tradingview_indicators": 0.25,
-            "ai_chart": 0.30,
-            "multi_timeframe": 0.20,
+            "ai_chart": 0.15,
+            "multi_timeframe": 0.35,
         }
 
     def evaluate_direction(
@@ -51,6 +52,26 @@ class SignalCombiner:
         Returns a dict with 'side', 'confidence', 'scores', 'reasoning'
         or None if no actionable signal.
         """
+        # Pre-filters: reject trades in trendless or low-volume conditions
+        indicators = tv_analysis.get("indicators", {})
+
+        # ADX filter — no trend = no trade
+        adx = indicators.get("adx")
+        if adx is not None and adx < 25:
+            logger.info("%s: ADX %.1f too low (< 25), no trend", symbol, adx)
+            return None
+
+        # Volume filter — weak volume = unreliable signal
+        volume = indicators.get("volume")
+        volume_sma = indicators.get("volume_sma20")
+        if volume is not None and volume_sma is not None and volume_sma > 0:
+            if volume < volume_sma * 1.2:
+                logger.info(
+                    "%s: Volume %.0f below 1.2x SMA20 (%.0f), skipping",
+                    symbol, volume, volume_sma,
+                )
+                return None
+
         scores = {}
 
         # 1. TradingView summary score (-1 to 1)
@@ -76,10 +97,10 @@ class SignalCombiner:
         else:
             # Redistribute AI weight to other sources
             weights = {
-                "tradingview_summary": 0.35,
-                "tradingview_indicators": 0.35,
+                "tradingview_summary": 0.30,
+                "tradingview_indicators": 0.30,
                 "ai_chart": 0.0,
-                "multi_timeframe": 0.30,
+                "multi_timeframe": 0.40,
             }
 
         # Weighted combined score
@@ -102,11 +123,13 @@ class SignalCombiner:
             logger.info("%s: %s not in allowed sides", symbol, side)
             return None
 
-        # Check AI opportunity confirmation (symmetric for both sides)
+        # AI veto — hard block if AI explicitly says no opportunity
         if side == "LONG" and ai_analysis.get("long_opportunity") is False:
-            combined_score *= 0.5
+            logger.info("%s: AI vetoed LONG opportunity, blocking trade", symbol)
+            return None
         elif side == "SHORT" and ai_analysis.get("short_opportunity") is False:
-            combined_score *= 0.5
+            logger.info("%s: AI vetoed SHORT opportunity, blocking trade", symbol)
+            return None
 
         confidence = min(abs(combined_score), 1.0)
 
