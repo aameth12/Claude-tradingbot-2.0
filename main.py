@@ -19,6 +19,14 @@ import subprocess
 import sys
 from datetime import datetime
 
+# Python 3.10+ removed the implicit event loop creation.
+# ib_insync/eventkit requires a running loop at import time.
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
