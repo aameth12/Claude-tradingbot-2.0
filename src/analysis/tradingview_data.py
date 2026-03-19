@@ -18,23 +18,61 @@ INTERVAL_MAP = {
 }
 
 
+EXCHANGE_MAP = {
+    "SPY": "AMEX", "QQQ": "NASDAQ", "IWM": "AMEX", "DIA": "AMEX",
+    "GLD": "AMEX", "SLV": "AMEX", "TLT": "NASDAQ", "XLF": "AMEX",
+    "XLE": "AMEX", "XLK": "AMEX", "VTI": "AMEX", "VOO": "AMEX",
+}
+
+EXCHANGE_FALLBACKS = ["NASDAQ", "NYSE", "AMEX"]
+
+
 class TradingViewAnalyzer:
     """Fetch technical indicators and recommendations from TradingView."""
 
     def __init__(self):
         self.config = get_config()["indicators"]
+        self._exchange_cache = {}
+
+    def _get_exchange(self, symbol: str) -> str:
+        """Get the exchange for a symbol, with caching."""
+        if symbol in self._exchange_cache:
+            return self._exchange_cache[symbol]
+        if symbol in EXCHANGE_MAP:
+            return EXCHANGE_MAP[symbol]
+        return "NASDAQ"
 
     def get_analysis(self, symbol: str, interval: str = "1h") -> dict:
         """Get full TradingView analysis for a symbol."""
         try:
             tv_interval = INTERVAL_MAP.get(interval, Interval.INTERVAL_1_HOUR)
-            handler = TA_Handler(
-                symbol=symbol,
-                screener="america",
-                exchange="NASDAQ",
-                interval=tv_interval,
-            )
-            analysis = handler.get_analysis()
+
+            # Try cached/mapped exchange first, then fallbacks
+            exchanges_to_try = [self._get_exchange(symbol)]
+            for ex in EXCHANGE_FALLBACKS:
+                if ex not in exchanges_to_try:
+                    exchanges_to_try.append(ex)
+
+            analysis = None
+            for exchange in exchanges_to_try:
+                try:
+                    handler = TA_Handler(
+                        symbol=symbol,
+                        screener="america",
+                        exchange=exchange,
+                        interval=tv_interval,
+                    )
+                    analysis = handler.get_analysis()
+                    if analysis and analysis.indicators.get("close") is not None:
+                        self._exchange_cache[symbol] = exchange
+                        logger.info("Using exchange %s for %s", exchange, symbol)
+                        break
+                except Exception:
+                    continue
+
+            if analysis is None:
+                logger.error("No valid exchange found for %s", symbol)
+                return {"symbol": symbol, "error": "No valid exchange found"}
 
             return {
                 "symbol": symbol,
