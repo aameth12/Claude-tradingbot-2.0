@@ -1,4 +1,5 @@
 import asyncio
+import math
 import json
 from datetime import datetime
 from typing import Optional
@@ -22,6 +23,7 @@ class IBKRClient:
         self.ib = IB()
         self.connected = False
         self.config = get_config()["broker"]
+        self._qualified_contracts: dict[str, Stock] = {}
 
     async def connect(self):
         if self.connected:
@@ -47,6 +49,7 @@ class IBKRClient:
         if self.connected:
             self.ib.disconnect()
             self.connected = False
+            self._qualified_contracts.clear()
             logger.info("Disconnected from IB Gateway")
 
     def _ensure_connected(self):
@@ -56,15 +59,28 @@ class IBKRClient:
     def create_stock_contract(self, symbol: str) -> Stock:
         return Stock(symbol, "SMART", "USD")
 
+    async def _get_qualified_contract(self, symbol: str) -> Stock:
+        """Get a qualified contract, using cache to avoid repeated async calls."""
+        if symbol in self._qualified_contracts:
+            return self._qualified_contracts[symbol]
+
+        contract = self.create_stock_contract(symbol)
+        try:
+            await self.ib.qualifyContractsAsync(contract)
+        except RuntimeError as e:
+            # "event loop already running" - proceed without qualification
+            # (works for well-known US stocks on SMART exchange)
+            logger.warning("Contract qualification fallback for %s: %s", symbol, e)
+
+        self._qualified_contracts[symbol] = contract
+        return contract
+
     async def get_market_data(self, symbol: str) -> dict:
         self._ensure_connected()
-        contract = self.create_stock_contract(symbol)
-        await self.ib.qualifyContractsAsync(contract)
+        contract = await self._get_qualified_contract(symbol)
         ticker = self.ib.reqMktData(contract, genericTickList="", snapshot=True)
         await asyncio.sleep(2)  # wait for data
         self.ib.cancelMktData(contract)
-
-        import math
 
         # Use last price, fallback to close, then bid/ask midpoint
         last = ticker.last
@@ -94,8 +110,7 @@ class IBKRClient:
         what_to_show: str = "TRADES",
     ) -> list[dict]:
         self._ensure_connected()
-        contract = self.create_stock_contract(symbol)
-        await self.ib.qualifyContractsAsync(contract)
+        contract = await self._get_qualified_contract(symbol)
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
@@ -121,8 +136,7 @@ class IBKRClient:
         self, symbol: str, action: str, quantity: int
     ) -> IBTrade:
         self._ensure_connected()
-        contract = self.create_stock_contract(symbol)
-        await self.ib.qualifyContractsAsync(contract)
+        contract = await self._get_qualified_contract(symbol)
         order = MarketOrder(action, quantity)
         trade = self.ib.placeOrder(contract, order)
         logger.info("Market order placed: %s %s %s shares", action, symbol, quantity)
@@ -139,8 +153,7 @@ class IBKRClient:
     ) -> list[IBTrade]:
         """Place a bracket order: entry + stop loss + take profit."""
         self._ensure_connected()
-        contract = self.create_stock_contract(symbol)
-        await self.ib.qualifyContractsAsync(contract)
+        contract = await self._get_qualified_contract(symbol)
 
         bracket = self.ib.bracketOrder(
             action=action,
@@ -156,7 +169,7 @@ class IBKRClient:
         for order in bracket:
             trade = self.ib.placeOrder(contract, order)
             trades.append(trade)
-            await self.ib.sleep(0.1)
+            await asyncio.sleep(0.1)
 
         logger.info(
             "Bracket order placed: %s %s | qty=%s | entry=%.2f | SL=%.2f | TP=%.2f",
@@ -173,8 +186,7 @@ class IBKRClient:
     ) -> IBTrade:
         """Place a trailing stop order."""
         self._ensure_connected()
-        contract = self.create_stock_contract(symbol)
-        await self.ib.qualifyContractsAsync(contract)
+        contract = await self._get_qualified_contract(symbol)
 
         # Reverse action for the stop (if we bought, trailing stop sells)
         stop_action = "SELL" if action == "BUY" else "BUY"

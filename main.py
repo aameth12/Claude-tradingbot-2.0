@@ -19,22 +19,6 @@ import subprocess
 import sys
 from datetime import datetime
 
-# Allow nested event loop usage - required for ib_insync when sharing
-# the event loop with telegram bot and APScheduler
-import nest_asyncio
-nest_asyncio.apply()
-
-# nest_asyncio confuses sniffio's async library detection, which breaks
-# httpx (used by python-telegram-bot). Patch it to fall back to asyncio.
-import sniffio
-_original_current_async_library = sniffio.current_async_library
-def _patched_current_async_library():
-    try:
-        return _original_current_async_library()
-    except sniffio.AsyncLibraryNotFoundError:
-        return "asyncio"
-sniffio.current_async_library = _patched_current_async_library
-
 # ib_insync/eventkit requires an event loop to exist at import time.
 try:
     asyncio.get_running_loop()
