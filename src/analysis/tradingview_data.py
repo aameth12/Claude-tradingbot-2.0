@@ -1,173 +1,277 @@
-import time
-from tradingview_ta import TA_Handler, Interval, Exchange
+"""Market data and technical analysis using yfinance + ta library.
+
+Replaces TradingView's unofficial API which was heavily rate-limited (HTTP 429).
+Uses Yahoo Finance for price data and the `ta` library to compute indicators locally.
+"""
+import yfinance as yf
+import pandas as pd
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.trend import MACD, EMAIndicator, SMAIndicator, ADXIndicator
+from ta.volatility import BollingerBands, AverageTrueRange
+
 from src.utils.logger import setup_logger
 from src.utils.config import get_config
 
 logger = setup_logger("analysis")
 
-INTERVAL_MAP = {
-    "1m": Interval.INTERVAL_1_MINUTE,
-    "5m": Interval.INTERVAL_5_MINUTES,
-    "15m": Interval.INTERVAL_15_MINUTES,
-    "30m": Interval.INTERVAL_30_MINUTES,
-    "1h": Interval.INTERVAL_1_HOUR,
-    "2h": Interval.INTERVAL_2_HOURS,
-    "4h": Interval.INTERVAL_4_HOURS,
-    "1d": Interval.INTERVAL_1_DAY,
-    "1w": Interval.INTERVAL_1_WEEK,
-    "1M": Interval.INTERVAL_1_MONTH,
+# Map config interval strings to yfinance intervals and lookback periods
+YF_INTERVAL_MAP = {
+    "1m": ("1m", "1d"),
+    "5m": ("5m", "5d"),
+    "15m": ("15m", "5d"),
+    "30m": ("30m", "10d"),
+    "1h": ("1h", "30d"),
+    "2h": ("2h", "60d"),
+    "4h": ("4h", "60d"),
+    "1d": ("1d", "6mo"),
+    "1w": ("1wk", "2y"),
+    "1M": ("1mo", "5y"),
 }
 
-EXCHANGE_MAP = {
-    # ETFs on AMEX
-    "SPY": "AMEX", "IWM": "AMEX", "DIA": "AMEX",
-    "GLD": "AMEX", "SLV": "AMEX", "XLF": "AMEX",
-    "XLE": "AMEX", "XLK": "AMEX", "VTI": "AMEX", "VOO": "AMEX",
-    # NASDAQ-listed
-    "QQQ": "NASDAQ", "TLT": "NASDAQ", "AAPL": "NASDAQ", "MSFT": "NASDAQ",
-    "GOOGL": "NASDAQ", "AMZN": "NASDAQ", "TSLA": "NASDAQ", "NVDA": "NASDAQ",
-    "META": "NASDAQ", "AMD": "NASDAQ",
-    # NYSE-listed
-    "JPM": "NYSE", "BAC": "NYSE", "WMT": "NYSE", "JNJ": "NYSE",
-    "V": "NYSE", "MA": "NYSE", "DIS": "NYSE", "KO": "NYSE",
-}
 
-EXCHANGE_FALLBACKS = ["NASDAQ", "NYSE", "AMEX"]
-
-# Rate limiting: minimum seconds between API calls
-_MIN_REQUEST_INTERVAL = 1.5
-_last_request_time = 0.0
+def _fetch_dataframe(symbol: str, interval: str = "1h") -> pd.DataFrame:
+    """Fetch OHLCV data from Yahoo Finance."""
+    yf_interval, period = YF_INTERVAL_MAP.get(interval, ("1h", "30d"))
+    ticker = yf.Ticker(symbol)
+    df = ticker.history(period=period, interval=yf_interval)
+    if df.empty:
+        return df
+    df.columns = [c.lower() for c in df.columns]
+    df = df[["open", "high", "low", "close", "volume"]].copy()
+    df.dropna(inplace=True)
+    return df
 
 
-def _rate_limit():
-    """Enforce minimum interval between TradingView API calls."""
-    global _last_request_time
-    now = time.time()
-    elapsed = now - _last_request_time
-    if elapsed < _MIN_REQUEST_INTERVAL:
-        sleep_time = _MIN_REQUEST_INTERVAL - elapsed
-        time.sleep(sleep_time)
-    _last_request_time = time.time()
+def _compute_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Compute all technical indicators on a DataFrame."""
+    if len(df) < 30:
+        return df
+
+    # RSI
+    rsi_period = config["rsi"]["period"]
+    df["rsi"] = RSIIndicator(df["close"], window=rsi_period).rsi()
+
+    # MACD
+    macd = MACD(
+        df["close"],
+        window_fast=config["macd"]["fast"],
+        window_slow=config["macd"]["slow"],
+        window_sign=config["macd"]["signal"],
+    )
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+
+    # Bollinger Bands
+    bb = BollingerBands(df["close"], window=config["bollinger"]["period"], window_dev=config["bollinger"]["std_dev"])
+    df["bb_upper"] = bb.bollinger_hband()
+    df["bb_lower"] = bb.bollinger_lband()
+
+    # ATR
+    atr = AverageTrueRange(df["high"], df["low"], df["close"], window=14)
+    df["atr"] = atr.average_true_range()
+
+    # ADX
+    adx = ADXIndicator(df["high"], df["low"], df["close"], window=14)
+    df["adx"] = adx.adx()
+
+    # Stochastic
+    stoch = StochasticOscillator(df["high"], df["low"], df["close"], window=14, smooth_window=3)
+    df["stoch_k"] = stoch.stoch()
+    df["stoch_d"] = stoch.stoch_signal()
+
+    # EMAs
+    for period in [10, 20, 50, 100, 200]:
+        if len(df) >= period:
+            df[f"ema{period}"] = EMAIndicator(df["close"], window=period).ema_indicator()
+        else:
+            df[f"ema{period}"] = None
+
+    # SMAs
+    for period in [10, 20, 50, 100, 200]:
+        if len(df) >= period:
+            df[f"sma{period}"] = SMAIndicator(df["close"], window=period).sma_indicator()
+        else:
+            df[f"sma{period}"] = None
+
+    return df
 
 
-def _fetch_with_retry(symbol, screener, exchange, interval, max_retries=2):
-    """Fetch TradingView analysis with retry on failure."""
-    for attempt in range(max_retries + 1):
-        _rate_limit()
-        try:
-            handler = TA_Handler(
-                symbol=symbol,
-                screener=screener,
-                exchange=exchange,
-                interval=interval,
-            )
-            analysis = handler.get_analysis()
-            if analysis and analysis.indicators.get("close") is not None:
-                return analysis
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str and attempt < max_retries:
-                wait = 3 * (attempt + 1)
-                logger.warning("Rate limited (429) for %s on %s, waiting %ds...", symbol, exchange, wait)
-                time.sleep(wait)
-                continue
-            elif attempt < max_retries:
-                continue
+def _generate_recommendation(df: pd.DataFrame) -> str:
+    """Generate BUY/SELL/NEUTRAL recommendation from latest indicators."""
+    if df.empty or len(df) < 2:
+        return "NEUTRAL"
+
+    last = df.iloc[-1]
+    buy_signals = 0
+    sell_signals = 0
+    total = 0
+
+    # RSI
+    if pd.notna(last.get("rsi")):
+        total += 1
+        if last["rsi"] < 40:
+            buy_signals += 1
+        elif last["rsi"] > 60:
+            sell_signals += 1
+
+    # MACD
+    if pd.notna(last.get("macd")) and pd.notna(last.get("macd_signal")):
+        total += 1
+        if last["macd"] > last["macd_signal"]:
+            buy_signals += 1
+        else:
+            sell_signals += 1
+
+    # Price vs EMAs
+    for ema in ["ema10", "ema20", "ema50"]:
+        if pd.notna(last.get(ema)):
+            total += 1
+            if last["close"] > last[ema]:
+                buy_signals += 1
             else:
-                logger.debug("Failed to fetch %s from %s: %s", symbol, exchange, e)
-    return None
+                sell_signals += 1
+
+    # Bollinger Bands
+    if pd.notna(last.get("bb_lower")) and pd.notna(last.get("bb_upper")):
+        total += 1
+        if last["close"] <= last["bb_lower"]:
+            buy_signals += 1
+        elif last["close"] >= last["bb_upper"]:
+            sell_signals += 1
+
+    if total == 0:
+        return "NEUTRAL"
+
+    ratio = (buy_signals - sell_signals) / total
+    if ratio >= 0.6:
+        return "STRONG_BUY"
+    elif ratio >= 0.2:
+        return "BUY"
+    elif ratio <= -0.6:
+        return "STRONG_SELL"
+    elif ratio <= -0.2:
+        return "SELL"
+    return "NEUTRAL"
 
 
 class TradingViewAnalyzer:
-    """Fetch technical indicators and recommendations from TradingView."""
+    """Fetch technical indicators using yfinance + ta library.
+
+    Maintains the same interface as the old TradingView-based analyzer
+    so the rest of the bot works without changes.
+    """
 
     def __init__(self):
         self.config = get_config()["indicators"]
-        self._exchange_cache = {}
+        self._df_cache = {}  # Cache DataFrames to avoid redundant fetches
 
-    def _get_exchange(self, symbol: str) -> str:
-        """Get the exchange for a symbol, with caching."""
-        if symbol in self._exchange_cache:
-            return self._exchange_cache[symbol]
-        if symbol in EXCHANGE_MAP:
-            return EXCHANGE_MAP[symbol]
-        return "NASDAQ"
+    def _get_df(self, symbol: str, interval: str) -> pd.DataFrame:
+        """Get DataFrame with indicators, using cache for same scan cycle."""
+        cache_key = f"{symbol}_{interval}"
+        if cache_key in self._df_cache:
+            return self._df_cache[cache_key]
+
+        df = _fetch_dataframe(symbol, interval)
+        if not df.empty:
+            df = _compute_indicators(df, self.config)
+        self._df_cache[cache_key] = df
+        return df
+
+    def clear_cache(self):
+        """Clear the DataFrame cache between scan cycles."""
+        self._df_cache.clear()
 
     def get_analysis(self, symbol: str, interval: str = "1h") -> dict:
-        """Get full TradingView analysis for a symbol."""
+        """Get full analysis for a symbol — compatible with old TradingView format."""
         try:
-            tv_interval = INTERVAL_MAP.get(interval, Interval.INTERVAL_1_HOUR)
+            df = self._get_df(symbol, interval)
 
-            # Try cached/mapped exchange first, then fallbacks
-            exchanges_to_try = [self._get_exchange(symbol)]
-            for ex in EXCHANGE_FALLBACKS:
-                if ex not in exchanges_to_try:
-                    exchanges_to_try.append(ex)
+            if df.empty or len(df) < 2:
+                logger.error("No data from Yahoo Finance for %s (%s)", symbol, interval)
+                return {"symbol": symbol, "error": "No data available"}
 
-            analysis = None
-            for exchange in exchanges_to_try:
-                analysis = _fetch_with_retry(symbol, "america", exchange, tv_interval)
-                if analysis:
-                    if exchange != self._get_exchange(symbol):
-                        logger.info("Found %s on exchange %s", symbol, exchange)
-                    self._exchange_cache[symbol] = exchange
-                    break
+            last = df.iloc[-1]
+            recommendation = _generate_recommendation(df)
 
-            if analysis is None:
-                logger.error("No valid exchange found for %s", symbol)
-                return {"symbol": symbol, "error": "No valid exchange found"}
+            # Count buy/sell/neutral from indicators
+            buy_count = 0
+            sell_count = 0
+            neutral_count = 0
+
+            checks = [
+                ("rsi", lambda v: v < 40, lambda v: v > 60),
+                ("macd", lambda v: v > (last.get("macd_signal") or 0), lambda v: v < (last.get("macd_signal") or 0)),
+            ]
+            for key, is_buy, is_sell in checks:
+                val = last.get(key)
+                if pd.notna(val):
+                    if is_buy(val):
+                        buy_count += 1
+                    elif is_sell(val):
+                        sell_count += 1
+                    else:
+                        neutral_count += 1
+
+            # EMA checks
+            for ema in ["ema10", "ema20", "ema50"]:
+                val = last.get(ema)
+                if pd.notna(val):
+                    if last["close"] > val:
+                        buy_count += 1
+                    else:
+                        sell_count += 1
 
             return {
                 "symbol": symbol,
                 "interval": interval,
                 "summary": {
-                    "recommendation": analysis.summary["RECOMMENDATION"],
-                    "buy_signals": analysis.summary["BUY"],
-                    "sell_signals": analysis.summary["SELL"],
-                    "neutral_signals": analysis.summary["NEUTRAL"],
+                    "recommendation": recommendation,
+                    "buy_signals": buy_count,
+                    "sell_signals": sell_count,
+                    "neutral_signals": neutral_count,
                 },
                 "oscillators": {
-                    "recommendation": analysis.oscillators["RECOMMENDATION"],
-                    "rsi": analysis.indicators.get("RSI"),
-                    "stoch_k": analysis.indicators.get("Stoch.K"),
-                    "stoch_d": analysis.indicators.get("Stoch.D"),
-                    "cci": analysis.indicators.get("CCI20"),
-                    "adx": analysis.indicators.get("ADX"),
-                    "ao": analysis.indicators.get("AO"),
-                    "momentum": analysis.indicators.get("Mom"),
-                    "macd": analysis.indicators.get("MACD.macd"),
-                    "macd_signal": analysis.indicators.get("MACD.signal"),
+                    "recommendation": recommendation,
+                    "rsi": _safe_float(last.get("rsi")),
+                    "stoch_k": _safe_float(last.get("stoch_k")),
+                    "stoch_d": _safe_float(last.get("stoch_d")),
+                    "cci": None,
+                    "adx": _safe_float(last.get("adx")),
+                    "ao": None,
+                    "momentum": None,
+                    "macd": _safe_float(last.get("macd")),
+                    "macd_signal": _safe_float(last.get("macd_signal")),
                 },
                 "moving_averages": {
-                    "recommendation": analysis.moving_averages["RECOMMENDATION"],
-                    "ema10": analysis.indicators.get("EMA10"),
-                    "ema20": analysis.indicators.get("EMA20"),
-                    "ema50": analysis.indicators.get("EMA50"),
-                    "ema100": analysis.indicators.get("EMA100"),
-                    "ema200": analysis.indicators.get("EMA200"),
-                    "sma10": analysis.indicators.get("SMA10"),
-                    "sma20": analysis.indicators.get("SMA20"),
-                    "sma50": analysis.indicators.get("SMA50"),
-                    "sma100": analysis.indicators.get("SMA100"),
-                    "sma200": analysis.indicators.get("SMA200"),
+                    "recommendation": recommendation,
+                    "ema10": _safe_float(last.get("ema10")),
+                    "ema20": _safe_float(last.get("ema20")),
+                    "ema50": _safe_float(last.get("ema50")),
+                    "ema100": _safe_float(last.get("ema100")),
+                    "ema200": _safe_float(last.get("ema200")),
+                    "sma10": _safe_float(last.get("sma10")),
+                    "sma20": _safe_float(last.get("sma20")),
+                    "sma50": _safe_float(last.get("sma50")),
+                    "sma100": _safe_float(last.get("sma100")),
+                    "sma200": _safe_float(last.get("sma200")),
                 },
                 "indicators": {
-                    "rsi": analysis.indicators.get("RSI"),
-                    "macd": analysis.indicators.get("MACD.macd"),
-                    "macd_signal": analysis.indicators.get("MACD.signal"),
-                    "bb_upper": analysis.indicators.get("BB.upper"),
-                    "bb_lower": analysis.indicators.get("BB.lower"),
-                    "atr": analysis.indicators.get("ATR"),
-                    "adx": analysis.indicators.get("ADX"),
-                    "volume": analysis.indicators.get("volume"),
-                    "close": analysis.indicators.get("close"),
-                    "open": analysis.indicators.get("open"),
-                    "high": analysis.indicators.get("high"),
-                    "low": analysis.indicators.get("low"),
+                    "rsi": _safe_float(last.get("rsi")),
+                    "macd": _safe_float(last.get("macd")),
+                    "macd_signal": _safe_float(last.get("macd_signal")),
+                    "bb_upper": _safe_float(last.get("bb_upper")),
+                    "bb_lower": _safe_float(last.get("bb_lower")),
+                    "atr": _safe_float(last.get("atr")),
+                    "adx": _safe_float(last.get("adx")),
+                    "volume": _safe_float(last.get("volume")),
+                    "close": _safe_float(last.get("close")),
+                    "open": _safe_float(last.get("open")),
+                    "high": _safe_float(last.get("high")),
+                    "low": _safe_float(last.get("low")),
                 },
             }
         except Exception as e:
-            logger.error("TradingView analysis failed for %s: %s", symbol, e)
+            logger.error("Analysis failed for %s: %s", symbol, e)
             return {"symbol": symbol, "error": str(e)}
 
     def get_multi_timeframe_analysis(self, symbol: str) -> dict:
@@ -183,9 +287,7 @@ class TradingViewAnalyzer:
         return results
 
     def get_signal_score(self, analysis: dict) -> float:
-        """Convert TradingView analysis to a -1.0 to 1.0 score.
-        Positive = bullish, Negative = bearish.
-        """
+        """Convert analysis to a -1.0 to 1.0 score."""
         if "error" in analysis:
             return 0.0
 
@@ -237,7 +339,7 @@ class TradingViewAnalyzer:
             else:
                 signals.append({"indicator": "BB", "signal": "NEUTRAL", "value": close, "reason": "Within bands"})
 
-        # EMA crossover (short vs medium)
+        # EMA crossover
         ema_short = analysis["moving_averages"].get("ema10")
         ema_medium = analysis["moving_averages"].get("ema20")
         if ema_short is not None and ema_medium is not None:
@@ -246,7 +348,6 @@ class TradingViewAnalyzer:
             else:
                 signals.append({"indicator": "EMA_CROSS", "signal": "SELL", "value": ema_short, "reason": "EMA10 < EMA20"})
 
-        # Determine overall
         buy_count = sum(1 for s in signals if s["signal"] == "BUY")
         sell_count = sum(1 for s in signals if s["signal"] == "SELL")
 
@@ -258,3 +359,14 @@ class TradingViewAnalyzer:
             overall = "NEUTRAL"
 
         return {"overall": overall, "signals": signals, "buy_count": buy_count, "sell_count": sell_count}
+
+
+def _safe_float(val) -> float | None:
+    """Convert a value to float, returning None for NaN/None."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        return None if pd.isna(f) else round(f, 6)
+    except (TypeError, ValueError):
+        return None

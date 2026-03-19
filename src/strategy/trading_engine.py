@@ -59,6 +59,9 @@ class TradingEngine:
         watchlist = self.config["watchlist"]
         logger.info("Scanning watchlist: %s", watchlist)
 
+        # Clear data cache from previous scan cycle
+        self.tv_analyzer.clear_cache()
+
         for symbol in watchlist:
             try:
                 signal = await self.analyze_symbol(symbol)

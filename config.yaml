@@ -51,7 +51,7 @@ timeframes:
     entry: "15m"                 # 15-minute chart for entry timing
     trend: "1d"                  # daily chart for trend confirmation
 
-# --- Technical Indicators (from TradingView) ---
+# --- Technical Indicators (computed locally via ta library) ---
 indicators:
   rsi:
     period: 14
