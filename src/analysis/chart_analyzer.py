@@ -16,7 +16,7 @@ from src.utils.config import ANTHROPIC_API_KEY, get_config, DATA_DIR
 
 logger = setup_logger("chart_analyzer")
 
-CHART_ANALYSIS_PROMPT = """You are an expert technical analyst. Analyze this stock chart and provide a trading recommendation.
+CHART_ANALYSIS_PROMPT = """You are an expert technical analyst. Analyze this stock chart and provide an unbiased trading recommendation. Consider BOTH long and short opportunities equally.
 
 Stock: {symbol}
 Timeframe: {timeframe}
@@ -42,6 +42,8 @@ Provide your response in this exact JSON format:
     "stop_loss_suggestion": price,
     "target_suggestion": price,
     "reasoning": "Brief explanation of analysis",
+    "long_opportunity": true | false,
+    "long_reasoning": "Why buying may or may not be appropriate",
     "short_opportunity": true | false,
     "short_reasoning": "Why shorting may or may not be appropriate"
 }}

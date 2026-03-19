@@ -102,8 +102,10 @@ class SignalCombiner:
             logger.info("%s: %s not in allowed sides", symbol, side)
             return None
 
-        # Check AI short recommendation specifically
-        if side == "SHORT" and ai_analysis.get("short_opportunity") is False:
+        # Check AI opportunity confirmation (symmetric for both sides)
+        if side == "LONG" and ai_analysis.get("long_opportunity") is False:
+            combined_score *= 0.5
+        elif side == "SHORT" and ai_analysis.get("short_opportunity") is False:
             combined_score *= 0.5
 
         confidence = min(abs(combined_score), 1.0)

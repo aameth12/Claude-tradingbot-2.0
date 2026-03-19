@@ -96,7 +96,7 @@ def _compute_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return df
 
 
-def _generate_recommendation(df: pd.DataFrame) -> str:
+def _generate_recommendation(df: pd.DataFrame, config: dict | None = None) -> str:
     """Generate BUY/SELL/NEUTRAL recommendation from latest indicators."""
     if df.empty or len(df) < 2:
         return "NEUTRAL"
@@ -106,12 +106,14 @@ def _generate_recommendation(df: pd.DataFrame) -> str:
     sell_signals = 0
     total = 0
 
-    # RSI
+    # RSI — use config thresholds if available
+    oversold = config["rsi"]["oversold"] if config else 35
+    overbought = config["rsi"]["overbought"] if config else 65
     if pd.notna(last.get("rsi")):
         total += 1
-        if last["rsi"] < 40:
+        if last["rsi"] < oversold:
             buy_signals += 1
-        elif last["rsi"] > 60:
+        elif last["rsi"] > overbought:
             sell_signals += 1
 
     # MACD
@@ -122,14 +124,31 @@ def _generate_recommendation(df: pd.DataFrame) -> str:
         else:
             sell_signals += 1
 
-    # Price vs EMAs
+    # EMA trend — single consolidated vote based on majority of EMAs
+    ema_buy = 0
+    ema_sell = 0
+    ema_count = 0
     for ema in ["ema10", "ema20", "ema50"]:
         if pd.notna(last.get(ema)):
-            total += 1
+            ema_count += 1
             if last["close"] > last[ema]:
-                buy_signals += 1
+                ema_buy += 1
             else:
-                sell_signals += 1
+                ema_sell += 1
+    if ema_count > 0:
+        total += 1
+        if ema_buy > ema_sell:
+            buy_signals += 1
+        elif ema_sell > ema_buy:
+            sell_signals += 1
+
+    # Stochastic
+    if pd.notna(last.get("stoch_k")) and pd.notna(last.get("stoch_d")):
+        total += 1
+        if last["stoch_k"] < 20 and last["stoch_k"] > last["stoch_d"]:
+            buy_signals += 1
+        elif last["stoch_k"] > 80 and last["stoch_k"] < last["stoch_d"]:
+            sell_signals += 1
 
     # Bollinger Bands
     if pd.notna(last.get("bb_lower")) and pd.notna(last.get("bb_upper")):
@@ -191,7 +210,7 @@ class TradingViewAnalyzer:
                 return {"symbol": symbol, "error": "No data available"}
 
             last = df.iloc[-1]
-            recommendation = _generate_recommendation(df)
+            recommendation = _generate_recommendation(df, self.config)
 
             # Count buy/sell/neutral from indicators
             buy_count = 0
