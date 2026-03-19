@@ -1,3 +1,4 @@
+import time
 from tradingview_ta import TA_Handler, Interval, Exchange
 from src.utils.logger import setup_logger
 from src.utils.config import get_config
@@ -17,14 +18,64 @@ INTERVAL_MAP = {
     "1M": Interval.INTERVAL_1_MONTH,
 }
 
-
 EXCHANGE_MAP = {
-    "SPY": "AMEX", "QQQ": "NASDAQ", "IWM": "AMEX", "DIA": "AMEX",
-    "GLD": "AMEX", "SLV": "AMEX", "TLT": "NASDAQ", "XLF": "AMEX",
+    # ETFs on AMEX
+    "SPY": "AMEX", "IWM": "AMEX", "DIA": "AMEX",
+    "GLD": "AMEX", "SLV": "AMEX", "XLF": "AMEX",
     "XLE": "AMEX", "XLK": "AMEX", "VTI": "AMEX", "VOO": "AMEX",
+    # NASDAQ-listed
+    "QQQ": "NASDAQ", "TLT": "NASDAQ", "AAPL": "NASDAQ", "MSFT": "NASDAQ",
+    "GOOGL": "NASDAQ", "AMZN": "NASDAQ", "TSLA": "NASDAQ", "NVDA": "NASDAQ",
+    "META": "NASDAQ", "AMD": "NASDAQ",
+    # NYSE-listed
+    "JPM": "NYSE", "BAC": "NYSE", "WMT": "NYSE", "JNJ": "NYSE",
+    "V": "NYSE", "MA": "NYSE", "DIS": "NYSE", "KO": "NYSE",
 }
 
 EXCHANGE_FALLBACKS = ["NASDAQ", "NYSE", "AMEX"]
+
+# Rate limiting: minimum seconds between API calls
+_MIN_REQUEST_INTERVAL = 1.5
+_last_request_time = 0.0
+
+
+def _rate_limit():
+    """Enforce minimum interval between TradingView API calls."""
+    global _last_request_time
+    now = time.time()
+    elapsed = now - _last_request_time
+    if elapsed < _MIN_REQUEST_INTERVAL:
+        sleep_time = _MIN_REQUEST_INTERVAL - elapsed
+        time.sleep(sleep_time)
+    _last_request_time = time.time()
+
+
+def _fetch_with_retry(symbol, screener, exchange, interval, max_retries=2):
+    """Fetch TradingView analysis with retry on failure."""
+    for attempt in range(max_retries + 1):
+        _rate_limit()
+        try:
+            handler = TA_Handler(
+                symbol=symbol,
+                screener=screener,
+                exchange=exchange,
+                interval=interval,
+            )
+            analysis = handler.get_analysis()
+            if analysis and analysis.indicators.get("close") is not None:
+                return analysis
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str and attempt < max_retries:
+                wait = 3 * (attempt + 1)
+                logger.warning("Rate limited (429) for %s on %s, waiting %ds...", symbol, exchange, wait)
+                time.sleep(wait)
+                continue
+            elif attempt < max_retries:
+                continue
+            else:
+                logger.debug("Failed to fetch %s from %s: %s", symbol, exchange, e)
+    return None
 
 
 class TradingViewAnalyzer:
@@ -55,20 +106,12 @@ class TradingViewAnalyzer:
 
             analysis = None
             for exchange in exchanges_to_try:
-                try:
-                    handler = TA_Handler(
-                        symbol=symbol,
-                        screener="america",
-                        exchange=exchange,
-                        interval=tv_interval,
-                    )
-                    analysis = handler.get_analysis()
-                    if analysis and analysis.indicators.get("close") is not None:
-                        self._exchange_cache[symbol] = exchange
-                        logger.info("Using exchange %s for %s", exchange, symbol)
-                        break
-                except Exception:
-                    continue
+                analysis = _fetch_with_retry(symbol, "america", exchange, tv_interval)
+                if analysis:
+                    if exchange != self._get_exchange(symbol):
+                        logger.info("Found %s on exchange %s", symbol, exchange)
+                    self._exchange_cache[symbol] = exchange
+                    break
 
             if analysis is None:
                 logger.error("No valid exchange found for %s", symbol)

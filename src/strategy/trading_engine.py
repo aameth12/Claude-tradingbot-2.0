@@ -91,9 +91,6 @@ class TradingEngine:
 
         # 1. Get TradingView analysis (primary timeframe)
         tv_analysis = self.tv_analyzer.get_analysis(symbol, "1h")
-        if "error" in tv_analysis:
-            # Try NASDAQ, then NYSE
-            tv_analysis = self.tv_analyzer.get_analysis(symbol, "1h")
 
         # 2. Get individual indicator signals
         tv_signals = self.tv_analyzer.check_indicator_signals(tv_analysis)
