@@ -151,7 +151,12 @@ class IBKRClient:
         stop_loss_price: float,
         take_profit_price: float,
     ) -> list[IBTrade]:
-        """Place a bracket order: entry + stop loss + take profit."""
+        """Place a bracket order: entry + stop loss + take profit.
+
+        Uses ib_insync's bracketOrder which sets transmit flags correctly:
+        parent(transmit=False), TP(transmit=False), SL(transmit=True).
+        The last order triggers all three to be sent as an atomic group.
+        """
         self._ensure_connected()
         contract = await self._get_qualified_contract(symbol)
 
@@ -163,13 +168,15 @@ class IBKRClient:
             stopLossPrice=stop_loss_price,
         )
 
-        # Place orders with a small pause between each to let IBKR register
-        # the parent order before child orders reference it (avoids Error 135)
+        # Place all three orders immediately without delay.
+        # The transmit flags ensure they're sent as one atomic batch.
         trades = []
         for order in bracket:
             trade = self.ib.placeOrder(contract, order)
             trades.append(trade)
-            await asyncio.sleep(0.1)
+
+        # Give IBKR time to process the batch
+        await asyncio.sleep(0.5)
 
         logger.info(
             "Bracket order placed: %s %s | qty=%s | entry=%.2f | SL=%.2f | TP=%.2f",
