@@ -35,6 +35,9 @@ class IBKRClient:
                 readonly=self.config.get("readonly", False),
             )
             self.connected = True
+            # Request delayed data as fallback when live data subscription
+            # is not available (avoids Error 10089)
+            self.ib.reqMarketDataType(3)  # 3 = delayed
             logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
         except Exception as e:
             logger.error("Failed to connect to IB Gateway: %s", e)
@@ -60,11 +63,23 @@ class IBKRClient:
         ticker = self.ib.reqMktData(contract, genericTickList="", snapshot=True)
         await asyncio.sleep(2)  # wait for data
         self.ib.cancelMktData(contract)
+
+        import math
+
+        # Use last price, fallback to close, then bid/ask midpoint
+        last = ticker.last
+        if last is None or (isinstance(last, float) and math.isnan(last)):
+            last = ticker.close
+        if last is None or (isinstance(last, float) and math.isnan(last)):
+            bid = ticker.bid if ticker.bid and not math.isnan(ticker.bid) else 0
+            ask = ticker.ask if ticker.ask and not math.isnan(ticker.ask) else 0
+            last = (bid + ask) / 2 if (bid and ask) else None
+
         return {
             "symbol": symbol,
             "bid": ticker.bid,
             "ask": ticker.ask,
-            "last": ticker.last,
+            "last": last,
             "volume": ticker.volume,
             "high": ticker.high,
             "low": ticker.low,

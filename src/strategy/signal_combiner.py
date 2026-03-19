@@ -69,9 +69,22 @@ class SignalCombiner:
         mtf_score = self._score_multi_timeframe(multi_tf_analyses)
         scores["multi_timeframe"] = mtf_score
 
+        # Use adjusted weights if AI analysis is unavailable (error or empty)
+        ai_available = ai_analysis and "error" not in ai_analysis and ai_analysis.get("recommendation", "NEUTRAL") != "NEUTRAL"
+        if ai_available:
+            weights = self.weights
+        else:
+            # Redistribute AI weight to other sources
+            weights = {
+                "tradingview_summary": 0.35,
+                "tradingview_indicators": 0.35,
+                "ai_chart": 0.0,
+                "multi_timeframe": 0.30,
+            }
+
         # Weighted combined score
         combined_score = sum(
-            scores[key] * self.weights[key] for key in scores
+            scores[key] * weights[key] for key in scores
         )
 
         # Determine side

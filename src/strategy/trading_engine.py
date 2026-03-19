@@ -278,7 +278,7 @@ class TradingEngine:
                 if trade.symbol not in position_symbols:
                     # Position was closed (SL or TP hit)
                     market_data = await self.broker.get_market_data(trade.symbol)
-                    exit_price = market_data.get("last", trade.entry_price)
+                    exit_price = market_data.get("last") or trade.entry_price
 
                     if trade.side == "LONG":
                         pnl = (exit_price - trade.entry_price) * trade.quantity
