@@ -3,6 +3,9 @@ import io
 import json
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend; must be set before mplfinance import
+
 import anthropic
 import pandas as pd
 import mplfinance as mpf
