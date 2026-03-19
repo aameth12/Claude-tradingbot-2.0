@@ -151,38 +151,42 @@ class IBKRClient:
         stop_loss_price: float,
         take_profit_price: float,
     ) -> list[IBTrade]:
-        """Place a bracket order: entry + stop loss + take profit.
+        """Place entry + exit orders for a trade.
 
-        Uses ib_insync's bracketOrder which sets transmit flags correctly:
-        parent(transmit=False), TP(transmit=False), SL(transmit=True).
-        The last order triggers all three to be sent as an atomic group.
+        Uses individual orders instead of ib_insync bracket orders to
+        avoid Error 135 in paper trading. Entry is a limit order; SL and
+        TP are placed as an OCA group so one cancels the other.
         """
         self._ensure_connected()
         contract = await self._get_qualified_contract(symbol)
 
-        bracket = self.ib.bracketOrder(
-            action=action,
-            quantity=quantity,
-            limitPrice=limit_price,
-            takeProfitPrice=take_profit_price,
-            stopLossPrice=stop_loss_price,
-        )
+        exit_action = "BUY" if action == "SELL" else "SELL"
+        oca_group = f"OCA_{symbol}_{self.ib.client.getReqId()}"
 
-        # Place all three orders immediately without delay.
-        # The transmit flags ensure they're sent as one atomic batch.
-        trades = []
-        for order in bracket:
-            trade = self.ib.placeOrder(contract, order)
-            trades.append(trade)
+        # 1. Entry limit order
+        entry_order = LimitOrder(action, quantity, limit_price)
+        entry_trade = self.ib.placeOrder(contract, entry_order)
 
-        # Give IBKR time to process the batch
+        # 2. Take profit limit order (OCA group)
+        tp_order = LimitOrder(exit_action, quantity, take_profit_price)
+        tp_order.ocaGroup = oca_group
+        tp_order.ocaType = 1  # Cancel other orders in group
+        tp_trade = self.ib.placeOrder(contract, tp_order)
+
+        # 3. Stop loss order (OCA group)
+        sl_order = StopOrder(exit_action, quantity, stop_loss_price)
+        sl_order.ocaGroup = oca_group
+        sl_order.ocaType = 1
+        sl_trade = self.ib.placeOrder(contract, sl_order)
+
         await asyncio.sleep(0.5)
 
         logger.info(
-            "Bracket order placed: %s %s | qty=%s | entry=%.2f | SL=%.2f | TP=%.2f",
+            "Orders placed: %s %s | qty=%s | entry=%.2f | SL=%.2f | TP=%.2f | OCA=%s",
             action, symbol, quantity, limit_price, stop_loss_price, take_profit_price,
+            oca_group,
         )
-        return trades
+        return [entry_trade, tp_trade, sl_trade]
 
     async def place_trailing_stop(
         self,
