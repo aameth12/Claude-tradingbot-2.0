@@ -1,0 +1,359 @@
+import asyncio
+import json
+from datetime import datetime, date
+
+from telegram import Update, BotCommand
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+from src.utils.logger import setup_logger
+from src.utils.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, get_config
+from src.utils.database import get_session, Trade, DailySummary, BacktestResult
+from src.backtest.backtester import Backtester
+
+logger = setup_logger("telegram")
+
+
+class TradingBot:
+    """Telegram bot for controlling the trading bot and receiving notifications."""
+
+    def __init__(self, trading_engine=None):
+        self.app = None
+        self.trading_engine = trading_engine
+        self.backtester = Backtester()
+        self.authorized_chat_id = TELEGRAM_CHAT_ID
+
+    def _is_authorized(self, update: Update) -> bool:
+        if not self.authorized_chat_id:
+            return True
+        return str(update.effective_chat.id) == str(self.authorized_chat_id)
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await update.message.reply_text("Unauthorized.")
+            return
+        msg = (
+            "AI Trading Bot Commands:\n\n"
+            "/status - Bot status & open positions\n"
+            "/pnl - Today's P&L summary\n"
+            "/trades - Recent trades\n"
+            "/watchlist - View watchlist\n"
+            "/add <SYMBOL> - Add to watchlist\n"
+            "/remove <SYMBOL> - Remove from watchlist\n"
+            "/backtest <SYMBOL> [period] - Backtest a stock\n"
+            "/summary - Daily summary\n"
+            "/positions - Open positions\n"
+            "/startbot - Start trading\n"
+            "/stopbot - Stop trading\n"
+            "/performance - Overall performance stats\n"
+            "/help - Show this help"
+        )
+        await update.message.reply_text(msg)
+
+    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        session = get_session()
+        try:
+            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
+            today_str = date.today().isoformat()
+            today_closed = session.query(Trade).filter(
+                Trade.status == "CLOSED", Trade.exit_time >= today_str
+            ).all()
+
+            config = get_config()
+            msg = (
+                f"Bot Status\n"
+                f"{'='*30}\n"
+                f"Mode: {config['trading']['mode']}\n"
+                f"Open Positions: {len(open_trades)}/{config['trading']['max_open_positions']}\n"
+                f"Today's Trades: {len(today_closed)}/{config['trading']['max_daily_trades']}\n"
+                f"Watchlist: {', '.join(config['watchlist'])}\n"
+            )
+
+            if open_trades:
+                msg += f"\nOpen Positions:\n"
+                for t in open_trades:
+                    msg += f"  {t.side} {t.symbol} @ ${t.entry_price:.2f} | SL: ${t.stop_loss:.2f} | TP: ${t.take_profit:.2f}\n"
+
+            await update.message.reply_text(msg)
+        finally:
+            session.close()
+
+    async def pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        session = get_session()
+        try:
+            today_str = date.today().isoformat()
+            trades = session.query(Trade).filter(
+                Trade.status == "CLOSED", Trade.exit_time >= today_str
+            ).all()
+
+            total_pnl = sum(t.pnl or 0 for t in trades)
+            winners = [t for t in trades if (t.pnl or 0) > 0]
+            losers = [t for t in trades if (t.pnl or 0) <= 0]
+
+            msg = (
+                f"Today's P&L\n"
+                f"{'='*30}\n"
+                f"Total P&L: ${total_pnl:+,.2f}\n"
+                f"Trades: {len(trades)}\n"
+                f"Winners: {len(winners)}\n"
+                f"Losers: {len(losers)}\n"
+                f"Win Rate: {len(winners)/len(trades)*100:.1f}%\n" if trades else
+                f"Today's P&L\n{'='*30}\nNo trades today.\n"
+            )
+
+            if trades:
+                msg += "\nTrade Details:\n"
+                for t in trades:
+                    emoji = "+" if (t.pnl or 0) > 0 else ""
+                    msg += f"  {t.side} {t.symbol}: ${t.pnl or 0:{emoji},.2f}\n"
+
+            await update.message.reply_text(msg)
+        finally:
+            session.close()
+
+    async def trades_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        session = get_session()
+        try:
+            recent = session.query(Trade).order_by(Trade.entry_time.desc()).limit(10).all()
+            if not recent:
+                await update.message.reply_text("No trades recorded yet.")
+                return
+
+            msg = "Recent Trades (last 10)\n" + "=" * 30 + "\n"
+            for t in recent:
+                pnl_str = f"${t.pnl:+,.2f}" if t.pnl is not None else "Open"
+                msg += f"{t.side} {t.symbol} | Entry: ${t.entry_price:.2f} | {pnl_str} | {t.status}\n"
+
+            await update.message.reply_text(msg)
+        finally:
+            session.close()
+
+    async def watchlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        config = get_config()
+        symbols = config["watchlist"]
+        msg = f"Watchlist ({len(symbols)} stocks)\n{'='*30}\n"
+        msg += "\n".join(f"  {s}" for s in symbols)
+        await update.message.reply_text(msg)
+
+    async def add_symbol(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: /add SYMBOL")
+            return
+        symbol = context.args[0].upper()
+        config = get_config()
+        if symbol in config["watchlist"]:
+            await update.message.reply_text(f"{symbol} already in watchlist.")
+            return
+        config["watchlist"].append(symbol)
+        await update.message.reply_text(f"Added {symbol} to watchlist.")
+
+    async def remove_symbol(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: /remove SYMBOL")
+            return
+        symbol = context.args[0].upper()
+        config = get_config()
+        if symbol not in config["watchlist"]:
+            await update.message.reply_text(f"{symbol} not in watchlist.")
+            return
+        config["watchlist"].remove(symbol)
+        await update.message.reply_text(f"Removed {symbol} from watchlist.")
+
+    async def backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: /backtest SYMBOL [period]\nExample: /backtest AAPL 6mo")
+            return
+
+        symbol = context.args[0].upper()
+        period = context.args[1] if len(context.args) > 1 else "1y"
+
+        await update.message.reply_text(f"Running backtest for {symbol} ({period})...")
+
+        try:
+            report = self.backtester.run_backtest(symbol, period=period)
+            msg = self.backtester.format_report(report)
+            await update.message.reply_text(msg)
+        except Exception as e:
+            await update.message.reply_text(f"Backtest failed: {e}")
+
+    async def summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        session = get_session()
+        try:
+            today_str = date.today().isoformat()
+            trades = session.query(Trade).filter(Trade.exit_time >= today_str).all()
+            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
+
+            closed = [t for t in trades if t.status == "CLOSED"]
+            total_pnl = sum(t.pnl or 0 for t in closed)
+            winners = [t for t in closed if (t.pnl or 0) > 0]
+
+            msg = (
+                f"Daily Summary - {today_str}\n"
+                f"{'='*40}\n\n"
+                f"Closed Trades: {len(closed)}\n"
+                f"Open Positions: {len(open_trades)}\n"
+                f"Total P&L: ${total_pnl:+,.2f}\n"
+                f"Win Rate: {len(winners)/len(closed)*100:.1f}%\n" if closed else
+                f"Daily Summary - {today_str}\n{'='*40}\n\nNo closed trades today.\n"
+                f"Open Positions: {len(open_trades)}\n"
+            )
+
+            if closed:
+                best = max(closed, key=lambda t: t.pnl or 0)
+                worst = min(closed, key=lambda t: t.pnl or 0)
+                msg += f"\nBest Trade: {best.side} {best.symbol} ${best.pnl:+,.2f}\n"
+                msg += f"Worst Trade: {worst.side} {worst.symbol} ${worst.pnl:+,.2f}\n"
+
+            if open_trades:
+                msg += f"\nOpen Positions:\n"
+                for t in open_trades:
+                    msg += f"  {t.side} {t.symbol} @ ${t.entry_price:.2f}\n"
+
+            await update.message.reply_text(msg)
+        finally:
+            session.close()
+
+    async def positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        session = get_session()
+        try:
+            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
+            if not open_trades:
+                await update.message.reply_text("No open positions.")
+                return
+
+            msg = f"Open Positions ({len(open_trades)})\n{'='*40}\n"
+            for t in open_trades:
+                msg += (
+                    f"\n{t.side} {t.symbol}\n"
+                    f"  Entry: ${t.entry_price:.2f} | Qty: {t.quantity}\n"
+                    f"  SL: ${t.stop_loss:.2f} | TP: ${t.take_profit:.2f}\n"
+                    f"  Entered: {t.entry_time}\n"
+                )
+            await update.message.reply_text(msg)
+        finally:
+            session.close()
+
+    async def performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        session = get_session()
+        try:
+            all_closed = session.query(Trade).filter(Trade.status == "CLOSED").all()
+            if not all_closed:
+                await update.message.reply_text("No completed trades yet.")
+                return
+
+            total_pnl = sum(t.pnl or 0 for t in all_closed)
+            winners = [t for t in all_closed if (t.pnl or 0) > 0]
+            losers = [t for t in all_closed if (t.pnl or 0) <= 0]
+            total_wins = sum(t.pnl or 0 for t in winners)
+            total_losses = abs(sum(t.pnl or 0 for t in losers))
+
+            msg = (
+                f"Overall Performance\n"
+                f"{'='*40}\n\n"
+                f"Total Trades: {len(all_closed)}\n"
+                f"Win Rate: {len(winners)/len(all_closed)*100:.1f}%\n"
+                f"Total P&L: ${total_pnl:+,.2f}\n"
+                f"Profit Factor: {total_wins/total_losses:.2f}\n" if total_losses > 0 else ""
+                f"Avg Win: ${total_wins/len(winners):,.2f}\n" if winners else ""
+                f"Avg Loss: ${total_losses/len(losers):,.2f}\n" if losers else ""
+            )
+            await update.message.reply_text(msg)
+        finally:
+            session.close()
+
+    async def startbot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        if self.trading_engine:
+            self.trading_engine.start()
+            await update.message.reply_text("Trading bot STARTED.")
+        else:
+            await update.message.reply_text("Trading engine not initialized.")
+
+    async def stopbot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        if self.trading_engine:
+            self.trading_engine.stop()
+            await update.message.reply_text("Trading bot STOPPED.")
+        else:
+            await update.message.reply_text("Trading engine not initialized.")
+
+    async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self.start(update, context)
+
+    def build_app(self) -> Application:
+        self.app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+        self.app.add_handler(CommandHandler("start", self.start))
+        self.app.add_handler(CommandHandler("status", self.status))
+        self.app.add_handler(CommandHandler("pnl", self.pnl))
+        self.app.add_handler(CommandHandler("trades", self.trades_cmd))
+        self.app.add_handler(CommandHandler("watchlist", self.watchlist))
+        self.app.add_handler(CommandHandler("add", self.add_symbol))
+        self.app.add_handler(CommandHandler("remove", self.remove_symbol))
+        self.app.add_handler(CommandHandler("backtest", self.backtest))
+        self.app.add_handler(CommandHandler("summary", self.summary))
+        self.app.add_handler(CommandHandler("positions", self.positions))
+        self.app.add_handler(CommandHandler("performance", self.performance))
+        self.app.add_handler(CommandHandler("startbot", self.startbot))
+        self.app.add_handler(CommandHandler("stopbot", self.stopbot))
+        self.app.add_handler(CommandHandler("help", self.help_cmd))
+
+        return self.app
+
+    async def send_notification(self, message: str):
+        """Send a notification message to the configured chat."""
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            logger.warning("Telegram not configured, skipping notification")
+            return
+        if self.app and self.app.bot:
+            await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+
+    async def send_trade_alert(self, trade_data: dict):
+        """Send a formatted trade alert."""
+        side = trade_data.get("side", "")
+        symbol = trade_data.get("symbol", "")
+        entry = trade_data.get("entry_price", 0)
+        sl = trade_data.get("stop_loss", 0)
+        tp = trade_data.get("take_profit", 0)
+        qty = trade_data.get("quantity", 0)
+        confidence = trade_data.get("confidence", 0)
+
+        msg = (
+            f"NEW TRADE ALERT\n"
+            f"{'='*30}\n"
+            f"Side: {side}\n"
+            f"Symbol: {symbol}\n"
+            f"Entry: ${entry:.2f}\n"
+            f"Stop Loss: ${sl:.2f}\n"
+            f"Take Profit: ${tp:.2f}\n"
+            f"Quantity: {qty}\n"
+            f"Confidence: {confidence:.1%}\n"
+        )
+        await self.send_notification(msg)

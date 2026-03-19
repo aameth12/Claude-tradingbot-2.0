@@ -1,0 +1,94 @@
+# ========================================
+# AI Trading Bot Configuration
+# ========================================
+
+# --- Watchlist ---
+watchlist:
+  - AAPL
+  - MSFT
+  - GOOGL
+  - AMZN
+  - TSLA
+  - NVDA
+  - META
+  - AMD
+  - SPY
+  - QQQ
+
+# --- Trading Parameters ---
+trading:
+  mode: paper                    # paper or live
+  max_position_size: 1000        # max dollars per position
+  max_daily_trades: 10           # max trades per day
+  max_open_positions: 5          # max concurrent positions
+  min_volume: 500000             # minimum avg daily volume
+  allowed_sides:
+    - LONG
+    - SHORT
+
+# --- Risk Management ---
+risk:
+  risk_reward_ratio: 2.0         # minimum reward:risk (1:2 means 2.0 here)
+  max_risk_per_trade_pct: 1.0    # max % of portfolio to risk per trade
+  max_daily_loss_pct: 3.0        # stop trading if daily loss exceeds this %
+  trailing_stop:
+    enabled: true
+    activation_pct: 1.0          # activate trailing stop after 1% profit
+    trail_pct: 0.5               # trail by 0.5% from high
+  stop_loss:
+    atr_multiplier: 1.5          # SL = entry +/- ATR * multiplier
+  take_profit:
+    atr_multiplier: 3.0          # TP = entry +/- ATR * multiplier (>= 2x SL for 1:2 RR)
+
+# --- Timeframes ---
+timeframes:
+  day_trading:
+    analysis: "5m"               # 5-minute chart for analysis
+    entry: "1m"                  # 1-minute chart for entry timing
+    trend: "1h"                  # 1-hour chart for trend confirmation
+  swing_trading:
+    analysis: "1h"               # 1-hour chart for analysis
+    entry: "15m"                 # 15-minute chart for entry timing
+    trend: "1d"                  # daily chart for trend confirmation
+
+# --- Technical Indicators (from TradingView) ---
+indicators:
+  rsi:
+    period: 14
+    overbought: 70
+    oversold: 30
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+  ema:
+    short: 9
+    medium: 21
+    long: 50
+  bollinger:
+    period: 20
+    std_dev: 2
+  volume:
+    sma_period: 20
+
+# --- AI Analysis ---
+ai:
+  model: "claude-sonnet-4-20250514"
+  chart_analysis_enabled: true
+  confidence_threshold: 0.7      # min AI confidence to take a trade
+
+# --- Schedule ---
+schedule:
+  market_open: "09:30"
+  market_close: "16:00"
+  timezone: "US/Eastern"
+  scan_interval_minutes: 5       # scan watchlist every N minutes
+  pre_market_scan: "09:15"       # scan before market open
+
+# --- Broker (IB Gateway) ---
+broker:
+  host: "127.0.0.1"
+  port: 4002                     # 4002 for IB Gateway paper, 4001 for live
+  client_id: 1
+  timeout: 30
+  readonly: false
