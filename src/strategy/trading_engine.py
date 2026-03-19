@@ -60,17 +60,36 @@ class TradingEngine:
         watchlist = self.config["watchlist"]
         logger.info("Scanning watchlist: %s", watchlist)
 
+        # Cancel stale unfilled orders to avoid Error 201 (max orders per side)
+        try:
+            await self.broker.cancel_stale_orders(symbols=watchlist, max_age_seconds=300)
+        except Exception as e:
+            logger.warning("Failed to cancel stale orders: %s", e)
+
         # Clear caches from previous scan cycle
         self.tv_analyzer.clear_cache()
         self._cached_portfolio_value = None
 
-        for symbol in watchlist:
+        # Analyze symbols in parallel (with per-symbol timeout)
+        async def _analyze_with_timeout(symbol: str):
             try:
-                signal = await self.analyze_symbol(symbol)
-                if signal:
-                    await self.execute_signal(signal)
+                return await asyncio.wait_for(self.analyze_symbol(symbol), timeout=60)
+            except asyncio.TimeoutError:
+                logger.warning("Analysis timeout for %s (>60s), skipping", symbol)
+                return None
             except Exception as e:
                 logger.error("Error analyzing %s: %s", symbol, e)
+                return None
+
+        signals = await asyncio.gather(*[_analyze_with_timeout(s) for s in watchlist])
+
+        # Execute signals sequentially (order placement should be serial)
+        for signal in signals:
+            if signal:
+                try:
+                    await self.execute_signal(signal)
+                except Exception as e:
+                    logger.error("Error executing signal for %s: %s", signal.symbol, e)
 
     async def analyze_symbol(self, symbol: str) -> Optional[TradeSignal]:
         """Run full analysis pipeline on a single symbol."""
@@ -222,7 +241,12 @@ class TradingEngine:
             logger.error("Failed to execute trade %s %s: %s", signal.side, signal.symbol, e)
 
     async def manage_open_positions(self):
-        """Update trailing stops and manage existing positions."""
+        """Update trailing stops and manage existing positions.
+
+        Only adjusts trailing stop when the new level moves significantly
+        (>0.10 from current stop) to avoid micro-adjustments that cause
+        premature exits via bid/ask spread noise.
+        """
         session = get_session()
         try:
             open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
@@ -251,15 +275,17 @@ class TradingEngine:
                         side=trade.side,
                     )
 
-                    # Update stop loss if changed
-                    if new_sl != trade.stop_loss and trade.order_id:
+                    # Only update if the change is meaningful (>$0.10)
+                    # to avoid micro-adjustments from bid/ask noise
+                    sl_diff = abs(new_sl - trade.stop_loss)
+                    if sl_diff > 0.10 and new_sl != trade.stop_loss and trade.order_id:
                         success = await self.broker.modify_stop_loss(trade.order_id, new_sl)
                         if success:
                             trade.stop_loss = new_sl
                             session.commit()
                             logger.info(
-                                "Trailing stop updated for %s: %.2f",
-                                trade.symbol, new_sl,
+                                "Trailing stop updated for %s: %.2f (moved $%.2f)",
+                                trade.symbol, new_sl, sl_diff,
                             )
 
                 except Exception as e:

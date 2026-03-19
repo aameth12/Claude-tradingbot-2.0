@@ -1,7 +1,7 @@
 import asyncio
 import math
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from ib_insync import IB, Stock, MarketOrder, LimitOrder, StopOrder, Contract, Order, Trade as IBTrade
@@ -79,7 +79,7 @@ class IBKRClient:
         self._ensure_connected()
         contract = await self._get_qualified_contract(symbol)
         ticker = self.ib.reqMktData(contract, genericTickList="", snapshot=True)
-        await asyncio.sleep(2)  # wait for data
+        await asyncio.sleep(1)  # wait for data (reduced from 2s)
         self.ib.cancelMktData(contract)
 
         # Use last price, fallback to close, then bid/ask midpoint
@@ -111,15 +111,22 @@ class IBKRClient:
     ) -> list[dict]:
         self._ensure_connected()
         contract = await self._get_qualified_contract(symbol)
-        bars = await self.ib.reqHistoricalDataAsync(
-            contract,
-            endDateTime="",
-            durationStr=duration,
-            barSizeSetting=bar_size,
-            whatToShow=what_to_show,
-            useRTH=True,
-            formatDate=1,
-        )
+        try:
+            bars = await asyncio.wait_for(
+                self.ib.reqHistoricalDataAsync(
+                    contract,
+                    endDateTime="",
+                    durationStr=duration,
+                    barSizeSetting=bar_size,
+                    whatToShow=what_to_show,
+                    useRTH=True,
+                    formatDate=1,
+                ),
+                timeout=20,  # 20s timeout for historical data
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Historical data timeout for %s", symbol)
+            return []
         return [
             {
                 "date": str(bar.date),
@@ -237,6 +244,46 @@ class IBKRClient:
                 logger.info("Order cancelled: %s", order_id)
                 return True
         return False
+
+    async def cancel_stale_orders(self, symbols: list[str] | None = None, max_age_seconds: int = 300):
+        """Cancel pending orders older than max_age_seconds for given symbols.
+
+        This prevents Error 201 (too many orders on one side) by cleaning up
+        stale unfilled orders before placing new ones.
+        """
+        self._ensure_connected()
+        now = datetime.now(timezone.utc)
+        cancelled = 0
+
+        for trade in self.ib.openTrades():
+            # Only cancel for specified symbols (or all if None)
+            if symbols and trade.contract.symbol not in symbols:
+                continue
+
+            status = trade.orderStatus.status
+            if status in ("Cancelled", "Filled", "Inactive"):
+                continue
+
+            # Check if the order has been sitting unfilled
+            if trade.log:
+                order_time = trade.log[0].time
+                # Handle timezone-naive timestamps from ib_insync
+                if order_time.tzinfo is None:
+                    order_time = order_time.replace(tzinfo=timezone.utc)
+                age = (now - order_time).total_seconds()
+                if age > max_age_seconds:
+                    self.ib.cancelOrder(trade.order)
+                    cancelled += 1
+                    logger.info(
+                        "Cancelled stale order: %s %s %s (age: %ds)",
+                        trade.order.action, trade.contract.symbol,
+                        trade.order.orderType, int(age),
+                    )
+
+        if cancelled:
+            logger.info("Cancelled %d stale orders", cancelled)
+            await asyncio.sleep(0.5)  # Let cancellations propagate
+        return cancelled
 
     async def get_positions(self) -> list[dict]:
         self._ensure_connected()

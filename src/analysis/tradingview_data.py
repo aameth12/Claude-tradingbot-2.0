@@ -29,11 +29,27 @@ YF_INTERVAL_MAP = {
 }
 
 
-def _fetch_dataframe(symbol: str, interval: str = "1h") -> pd.DataFrame:
-    """Fetch OHLCV data from Yahoo Finance."""
+def _fetch_dataframe(symbol: str, interval: str = "1h", timeout: int = 15) -> pd.DataFrame:
+    """Fetch OHLCV data from Yahoo Finance with timeout."""
+    import concurrent.futures
+
     yf_interval, period = YF_INTERVAL_MAP.get(interval, ("1h", "30d"))
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, interval=yf_interval)
+
+    def _download():
+        ticker = yf.Ticker(symbol)
+        return ticker.history(period=period, interval=yf_interval)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_download)
+            df = future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        logger.warning("Yahoo Finance timeout for %s (%s) after %ds", symbol, interval, timeout)
+        return pd.DataFrame()
+    except Exception as e:
+        logger.warning("Yahoo Finance error for %s (%s): %s", symbol, interval, e)
+        return pd.DataFrame()
+
     if df.empty:
         return df
     df.columns = [c.lower() for c in df.columns]

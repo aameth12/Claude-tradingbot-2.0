@@ -56,7 +56,10 @@ class ChartAnalyzer:
     """Uses Claude Vision to analyze stock charts for patterns and signals."""
 
     def __init__(self):
-        self.client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        self.client = anthropic.Anthropic(
+            api_key=ANTHROPIC_API_KEY,
+            timeout=30.0,  # 30s timeout for API calls
+        )
         self.config = get_config()["ai"]
         self.charts_dir = DATA_DIR / "charts"
         self.charts_dir.mkdir(exist_ok=True)

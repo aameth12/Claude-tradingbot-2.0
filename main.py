@@ -100,26 +100,27 @@ async def run_bot():
         name="Pre-Market Scan",
     )
 
-    # Manage positions every minute during market hours
+    # Manage positions every 2 minutes during market hours
+    # (less frequent = less micro-adjustment of trailing stops)
     scheduler.add_job(
         engine.manage_open_positions,
         CronTrigger(
             day_of_week="mon-fri",
             hour="9-16",
-            minute="*",
+            minute="*/2",
             timezone=config["schedule"]["timezone"],
         ),
         id="manage_positions",
         name="Manage Positions",
     )
 
-    # Check for closed positions every minute
+    # Check for closed positions every 2 minutes
     scheduler.add_job(
         engine.check_closed_positions,
         CronTrigger(
             day_of_week="mon-fri",
             hour="9-16",
-            minute="*",
+            minute="*/2",
             timezone=config["schedule"]["timezone"],
         ),
         id="check_closed",
