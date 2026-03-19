@@ -135,10 +135,13 @@ class IBKRClient:
             stopLossPrice=stop_loss_price,
         )
 
+        # Place orders with a small pause between each to let IBKR register
+        # the parent order before child orders reference it (avoids Error 135)
         trades = []
         for order in bracket:
             trade = self.ib.placeOrder(contract, order)
             trades.append(trade)
+            await self.ib.sleep(0.1)
 
         logger.info(
             "Bracket order placed: %s %s | qty=%s | entry=%.2f | SL=%.2f | TP=%.2f",
