@@ -19,8 +19,8 @@ watchlist:
 trading:
   mode: paper                    # paper or live
   max_position_size: 1000        # max dollars per position
-  max_daily_trades: 10           # max trades per day
-  max_open_positions: 5          # max concurrent positions
+  max_daily_trades: 0            # 0 = unlimited trades per day
+  max_open_positions: 10         # max concurrent positions
   min_volume: 500000             # minimum avg daily volume
   allowed_sides:
     - LONG
@@ -55,8 +55,8 @@ timeframes:
 indicators:
   rsi:
     period: 14
-    overbought: 70
-    oversold: 30
+    overbought: 65
+    oversold: 35
   macd:
     fast: 12
     slow: 26
@@ -75,14 +75,14 @@ indicators:
 ai:
   model: "claude-sonnet-4-20250514"
   chart_analysis_enabled: true
-  confidence_threshold: 0.7      # min AI confidence to take a trade
+  confidence_threshold: 0.45     # min AI confidence to take a trade
 
 # --- Schedule ---
 schedule:
   market_open: "09:30"
   market_close: "16:00"
   timezone: "US/Eastern"
-  scan_interval_minutes: 5       # scan watchlist every N minutes
+  scan_interval_minutes: 2       # scan watchlist every N minutes
   pre_market_scan: "09:15"       # scan before market open
 
 # --- Broker (IB Gateway) ---

@@ -155,10 +155,10 @@ class Backtester:
                 elif sell_score > buy_score:
                     sell_score += 0.5
 
-            # Need at least 2.5 score for a signal
-            if buy_score >= 2.5 and buy_score > sell_score:
+            # Need at least 1.5 score for a signal
+            if buy_score >= 1.5 and buy_score > sell_score:
                 df.iloc[i, df.columns.get_loc("signal")] = 1
-            elif sell_score >= 2.5 and sell_score > buy_score:
+            elif sell_score >= 1.5 and sell_score > buy_score:
                 df.iloc[i, df.columns.get_loc("signal")] = -1
 
         return df

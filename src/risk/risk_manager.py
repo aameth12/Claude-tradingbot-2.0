@@ -147,16 +147,17 @@ class RiskManager:
             if open_trades >= max_positions:
                 return False, f"Max open positions reached ({open_trades}/{max_positions})"
 
-            # Check daily trade count
-            today = date.today().isoformat()
-            daily_trades = (
-                session.query(Trade)
-                .filter(Trade.entry_time >= today)
-                .count()
-            )
+            # Check daily trade count (0 = unlimited)
             max_daily = self.trading_config["max_daily_trades"]
-            if daily_trades >= max_daily:
-                return False, f"Max daily trades reached ({daily_trades}/{max_daily})"
+            if max_daily > 0:
+                today = date.today().isoformat()
+                daily_trades = (
+                    session.query(Trade)
+                    .filter(Trade.entry_time >= today)
+                    .count()
+                )
+                if daily_trades >= max_daily:
+                    return False, f"Max daily trades reached ({daily_trades}/{max_daily})"
 
             # Check daily loss limit
             if self.check_daily_loss_limit():
