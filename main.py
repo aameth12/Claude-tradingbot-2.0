@@ -19,6 +19,11 @@ import subprocess
 import sys
 from datetime import datetime
 
+# Allow nested event loop usage - required for ib_insync when sharing
+# the event loop with telegram bot and APScheduler
+import nest_asyncio
+nest_asyncio.apply()
+
 # ib_insync/eventkit requires an event loop to exist at import time.
 try:
     asyncio.get_running_loop()
