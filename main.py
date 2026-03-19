@@ -166,9 +166,14 @@ async def run_bot():
         scheduler.shutdown()
         engine.stop()
         engine.broker.disconnect()
-        await telegram_app.updater.stop()
-        await telegram_app.stop()
-        await telegram_app.shutdown()
+        try:
+            if telegram_app.updater and telegram_app.updater.running:
+                await telegram_app.updater.stop()
+            if telegram_app.running:
+                await telegram_app.stop()
+            await telegram_app.shutdown()
+        except Exception as e:
+            logger.warning("Cleanup error (safe to ignore): %s", e)
         logger.info("Bot shutdown complete")
 
 
