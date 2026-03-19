@@ -38,19 +38,19 @@ class SignalCombiner:
             "multi_timeframe": 0.20,
         }
 
-    def combine_signals(
+    def evaluate_direction(
         self,
         symbol: str,
         tv_analysis: dict,
         tv_indicator_signals: dict,
         ai_analysis: dict,
         multi_tf_analyses: dict,
-        current_price: float,
-        atr: float,
-        trade_levels: dict,
-    ) -> Optional[TradeSignal]:
-        """Combine all signal sources into a final trade decision."""
+    ) -> Optional[dict]:
+        """Determine signal direction and confidence from all sources.
 
+        Returns a dict with 'side', 'confidence', 'scores', 'reasoning'
+        or None if no actionable signal.
+        """
         scores = {}
 
         # 1. TradingView summary score (-1 to 1)
@@ -96,7 +96,7 @@ class SignalCombiner:
             logger.info("%s: Combined score is 0, no signal", symbol)
             return None
 
-        # Check if SHORT is allowed
+        # Check if side is allowed
         allowed_sides = self.config["trading"]["allowed_sides"]
         if side not in allowed_sides:
             logger.info("%s: %s not in allowed sides", symbol, side)
@@ -104,7 +104,6 @@ class SignalCombiner:
 
         # Check AI short recommendation specifically
         if side == "SHORT" and ai_analysis.get("short_opportunity") is False:
-            # Reduce confidence if AI doesn't see short opportunity
             combined_score *= 0.5
 
         confidence = min(abs(combined_score), 1.0)
@@ -116,30 +115,48 @@ class SignalCombiner:
             )
             return None
 
-        # Validate trade levels
+        reasoning = self._build_reasoning(scores, side, ai_analysis)
+
+        logger.info(
+            "DIRECTION: %s %s | confidence=%.2f | scores=%s",
+            side, symbol, confidence, scores,
+        )
+        return {
+            "side": side,
+            "confidence": round(confidence, 3),
+            "scores": scores,
+            "reasoning": reasoning,
+            "timeframe": self._determine_timeframe(scores),
+        }
+
+    def build_signal(
+        self,
+        symbol: str,
+        direction: dict,
+        trade_levels: dict,
+    ) -> Optional[TradeSignal]:
+        """Build a TradeSignal from a validated direction and matching trade levels."""
         if not trade_levels.get("valid"):
             logger.info("%s: Trade levels invalid (RR or qty)", symbol)
             return None
 
-        reasoning = self._build_reasoning(scores, side, ai_analysis)
-
         signal = TradeSignal(
             symbol=symbol,
-            side=side,
-            confidence=round(confidence, 3),
+            side=direction["side"],
+            confidence=direction["confidence"],
             entry_price=trade_levels["entry_price"],
             stop_loss=trade_levels["stop_loss"],
             take_profit=trade_levels["take_profit"],
             quantity=trade_levels["quantity"],
-            timeframe=self._determine_timeframe(scores),
+            timeframe=direction["timeframe"],
             strategy="combined_signal",
-            signals_detail=scores,
-            reasoning=reasoning,
+            signals_detail=direction["scores"],
+            reasoning=direction["reasoning"],
         )
 
         logger.info(
             "SIGNAL: %s %s | confidence=%.2f | entry=%.2f | SL=%.2f | TP=%.2f | qty=%d",
-            side, symbol, confidence,
+            signal.side, symbol, signal.confidence,
             signal.entry_price, signal.stop_loss, signal.take_profit, signal.quantity,
         )
         return signal

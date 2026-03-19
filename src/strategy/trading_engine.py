@@ -129,8 +129,19 @@ class TradingEngine:
             except Exception as e:
                 logger.warning("AI chart analysis skipped for %s: %s", symbol, e)
 
-        # 6. Calculate trade levels
-        # Fetch portfolio value once per scan cycle (avoid IBKR request spam)
+        # 6. Determine signal direction from all sources FIRST
+        direction = self.signal_combiner.evaluate_direction(
+            symbol=symbol,
+            tv_analysis=tv_analysis,
+            tv_indicator_signals=tv_signals,
+            ai_analysis=ai_analysis,
+            multi_tf_analyses=multi_tf,
+        )
+
+        if not direction:
+            return None
+
+        # 7. Now compute trade levels for the ACTUAL signal side
         if self._cached_portfolio_value is None:
             self._cached_portfolio_value = 100000  # Default
             try:
@@ -140,23 +151,14 @@ class TradingEngine:
                 pass
         portfolio_value = self._cached_portfolio_value
 
-        # Determine preliminary side from TV summary
-        tv_score = self.tv_analyzer.get_signal_score(tv_analysis)
-        preliminary_side = "LONG" if tv_score >= 0 else "SHORT"
-
         trade_levels = self.risk_manager.get_trade_levels(
-            current_price, atr, preliminary_side, portfolio_value
+            current_price, atr, direction["side"], portfolio_value
         )
 
-        # 7. Combine all signals
-        signal = self.signal_combiner.combine_signals(
+        # 8. Build final signal with correctly matched trade levels
+        signal = self.signal_combiner.build_signal(
             symbol=symbol,
-            tv_analysis=tv_analysis,
-            tv_indicator_signals=tv_signals,
-            ai_analysis=ai_analysis,
-            multi_tf_analyses=multi_tf,
-            current_price=current_price,
-            atr=atr,
+            direction=direction,
             trade_levels=trade_levels,
         )
 
