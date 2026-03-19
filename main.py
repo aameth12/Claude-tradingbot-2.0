@@ -19,6 +19,13 @@ import subprocess
 import sys
 from datetime import datetime
 
+# ib_insync/eventkit requires an event loop to exist at import time.
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
