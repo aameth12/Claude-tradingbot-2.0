@@ -69,7 +69,7 @@ class RiskManager:
         rr = reward / risk
         min_rr = self.config["risk_reward_ratio"]
 
-        if rr < min_rr:
+        if rr < min_rr - 0.01:  # Small tolerance for floating point rounding
             logger.warning("RR ratio %.2f below minimum %.2f", rr, min_rr)
             return False
 

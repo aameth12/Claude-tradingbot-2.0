@@ -32,6 +32,7 @@ class TradingEngine:
 
         # Track highest/lowest prices for trailing stops
         self._price_extremes = {}  # {symbol: highest_or_lowest_price}
+        self._cached_portfolio_value = None  # Cached per scan cycle
 
         init_db()
 
@@ -59,8 +60,9 @@ class TradingEngine:
         watchlist = self.config["watchlist"]
         logger.info("Scanning watchlist: %s", watchlist)
 
-        # Clear data cache from previous scan cycle
+        # Clear caches from previous scan cycle
         self.tv_analyzer.clear_cache()
+        self._cached_portfolio_value = None
 
         for symbol in watchlist:
             try:
@@ -119,18 +121,24 @@ class TradingEngine:
                 )
                 if bars:
                     df = pd.DataFrame(bars)
-                    ai_analysis = self.chart_analyzer.analyze_from_data(df, symbol, "5m")
+                    # Run sync AI analysis in executor to avoid event loop conflicts
+                    loop = asyncio.get_event_loop()
+                    ai_analysis = await loop.run_in_executor(
+                        None, self.chart_analyzer.analyze_from_data, df, symbol, "5m"
+                    )
             except Exception as e:
                 logger.warning("AI chart analysis skipped for %s: %s", symbol, e)
 
         # 6. Calculate trade levels
-        # Try both LONG and SHORT, pick the one with a stronger signal
-        portfolio_value = 100000  # Default, should get from broker
-        try:
-            account = await self.broker.get_account_summary()
-            portfolio_value = float(account.get("NetLiquidation", 100000))
-        except Exception:
-            pass
+        # Fetch portfolio value once per scan cycle (avoid IBKR request spam)
+        if self._cached_portfolio_value is None:
+            self._cached_portfolio_value = 100000  # Default
+            try:
+                account = await self.broker.get_account_summary()
+                self._cached_portfolio_value = float(account.get("NetLiquidation", 100000))
+            except Exception:
+                pass
+        portfolio_value = self._cached_portfolio_value
 
         # Determine preliminary side from TV summary
         tv_score = self.tv_analyzer.get_signal_score(tv_analysis)
