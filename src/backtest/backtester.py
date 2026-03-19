@@ -130,17 +130,29 @@ class Backtester:
             elif df["rsi"].iloc[i] > cfg["rsi"]["overbought"]:
                 sell_score += 1
 
-            # MACD crossover
+            # MACD crossover (strong signal)
             if df["macd"].iloc[i] > df["macd_signal"].iloc[i] and df["macd"].iloc[i - 1] <= df["macd_signal"].iloc[i - 1]:
                 buy_score += 1.5
             elif df["macd"].iloc[i] < df["macd_signal"].iloc[i] and df["macd"].iloc[i - 1] >= df["macd_signal"].iloc[i - 1]:
                 sell_score += 1.5
 
-            # EMA alignment
+            # MACD direction (weaker but more frequent)
+            if df["macd"].iloc[i] > df["macd_signal"].iloc[i]:
+                buy_score += 0.5
+            elif df["macd"].iloc[i] < df["macd_signal"].iloc[i]:
+                sell_score += 0.5
+
+            # EMA alignment (full)
             if df["ema_short"].iloc[i] > df["ema_medium"].iloc[i] > df["ema_long"].iloc[i]:
                 buy_score += 1
             elif df["ema_short"].iloc[i] < df["ema_medium"].iloc[i] < df["ema_long"].iloc[i]:
                 sell_score += 1
+
+            # EMA short/medium crossover
+            if df["ema_short"].iloc[i] > df["ema_medium"].iloc[i] and df["ema_short"].iloc[i - 1] <= df["ema_medium"].iloc[i - 1]:
+                buy_score += 0.5
+            elif df["ema_short"].iloc[i] < df["ema_medium"].iloc[i] and df["ema_short"].iloc[i - 1] >= df["ema_medium"].iloc[i - 1]:
+                sell_score += 0.5
 
             # Bollinger Band touch
             if df["close"].iloc[i] <= df["bb_lower"].iloc[i]:
@@ -155,10 +167,10 @@ class Backtester:
                 elif sell_score > buy_score:
                     sell_score += 0.5
 
-            # Need at least 1.5 score for a signal
-            if buy_score >= 1.5 and buy_score > sell_score:
+            # Need at least 1.0 score for a signal
+            if buy_score >= 1.0 and buy_score > sell_score:
                 df.iloc[i, df.columns.get_loc("signal")] = 1
-            elif sell_score >= 1.5 and sell_score > buy_score:
+            elif sell_score >= 1.0 and sell_score > buy_score:
                 df.iloc[i, df.columns.get_loc("signal")] = -1
 
         return df
@@ -181,139 +193,146 @@ class Backtester:
         capital = initial_capital
         peak_capital = initial_capital
         max_drawdown = 0.0
-        in_trade = False
-        trade_entry = None
-        trade_side = None
-        trade_sl = None
-        trade_tp = None
-        trade_qty = 0
-        highest_price = 0.0  # for trailing stop
+        # Support multiple concurrent positions
+        open_positions = []  # list of dicts with trade info
 
         for i in range(len(df)):
             row = df.iloc[i]
 
-            if in_trade:
-                # Update trailing stop
-                if trade_side == "LONG":
-                    if row["high"] > highest_price:
-                        highest_price = row["high"]
-                    # Check trailing stop
-                    profit_pct = ((row["close"] - trade_entry) / trade_entry) * 100
-                    if profit_pct >= self.risk_config["trailing_stop"]["activation_pct"]:
-                        new_sl = highest_price * (1 - self.risk_config["trailing_stop"]["trail_pct"] / 100)
-                        if new_sl > trade_sl:
-                            trade_sl = new_sl
+            # Check exits for all open positions
+            closed_indices = []
+            for idx, pos in enumerate(open_positions):
+                exit_price = None
+                exit_reason = None
 
-                    # Check exits
-                    if row["low"] <= trade_sl:
-                        exit_price = trade_sl
-                        exit_reason = "TRAILING_SL" if trade_sl > (trade_entry - df["atr"].iloc[i] * self.risk_config["stop_loss"]["atr_multiplier"]) else "SL"
-                    elif row["high"] >= trade_tp:
-                        exit_price = trade_tp
+                if pos["side"] == "LONG":
+                    if row["high"] > pos["highest_price"]:
+                        pos["highest_price"] = row["high"]
+                    profit_pct = ((row["close"] - pos["entry"]) / pos["entry"]) * 100
+                    if profit_pct >= self.risk_config["trailing_stop"]["activation_pct"]:
+                        new_sl = pos["highest_price"] * (1 - self.risk_config["trailing_stop"]["trail_pct"] / 100)
+                        if new_sl > pos["sl"]:
+                            pos["sl"] = new_sl
+
+                    if row["low"] <= pos["sl"]:
+                        exit_price = pos["sl"]
+                        original_sl = pos["entry"] - df["atr"].iloc[i] * self.risk_config["stop_loss"]["atr_multiplier"]
+                        exit_reason = "TRAILING_SL" if pos["sl"] > original_sl else "SL"
+                    elif row["high"] >= pos["tp"]:
+                        exit_price = pos["tp"]
                         exit_reason = "TP"
-                    else:
-                        continue  # Still in trade
 
                 else:  # SHORT
-                    if row["low"] < highest_price:  # highest_price stores lowest for shorts
-                        highest_price = row["low"]
-                    profit_pct = ((trade_entry - row["close"]) / trade_entry) * 100
+                    if row["low"] < pos["highest_price"]:
+                        pos["highest_price"] = row["low"]
+                    profit_pct = ((pos["entry"] - row["close"]) / pos["entry"]) * 100
                     if profit_pct >= self.risk_config["trailing_stop"]["activation_pct"]:
-                        new_sl = highest_price * (1 + self.risk_config["trailing_stop"]["trail_pct"] / 100)
-                        if new_sl < trade_sl:
-                            trade_sl = new_sl
+                        new_sl = pos["highest_price"] * (1 + self.risk_config["trailing_stop"]["trail_pct"] / 100)
+                        if new_sl < pos["sl"]:
+                            pos["sl"] = new_sl
 
-                    if row["high"] >= trade_sl:
-                        exit_price = trade_sl
+                    if row["high"] >= pos["sl"]:
+                        exit_price = pos["sl"]
                         exit_reason = "SL"
-                    elif row["low"] <= trade_tp:
-                        exit_price = trade_tp
+                    elif row["low"] <= pos["tp"]:
+                        exit_price = pos["tp"]
                         exit_reason = "TP"
+
+                if exit_price is not None:
+                    if pos["side"] == "LONG":
+                        pnl = (exit_price - pos["entry"]) * pos["qty"]
                     else:
-                        continue
+                        pnl = (pos["entry"] - exit_price) * pos["qty"]
 
-                # Close trade
-                if trade_side == "LONG":
-                    pnl = (exit_price - trade_entry) * trade_qty
-                else:
-                    pnl = (trade_entry - exit_price) * trade_qty
+                    pnl_pct = (pnl / (pos["entry"] * pos["qty"])) * 100
+                    capital += pnl
 
-                pnl_pct = (pnl / (trade_entry * trade_qty)) * 100
-                capital += pnl
+                    trades.append(BacktestTrade(
+                        entry_date=str(pos["entry_date"]),
+                        exit_date=str(row.name),
+                        side=pos["side"],
+                        entry_price=pos["entry"],
+                        exit_price=exit_price,
+                        stop_loss=pos["sl"],
+                        take_profit=pos["tp"],
+                        quantity=pos["qty"],
+                        pnl=round(pnl, 2),
+                        pnl_pct=round(pnl_pct, 2),
+                        exit_reason=exit_reason,
+                    ))
 
-                trades.append(BacktestTrade(
-                    entry_date=str(trade_entry_date),
-                    exit_date=str(row.name),
-                    side=trade_side,
-                    entry_price=trade_entry,
-                    exit_price=exit_price,
-                    stop_loss=trade_sl,
-                    take_profit=trade_tp,
-                    quantity=trade_qty,
-                    pnl=round(pnl, 2),
-                    pnl_pct=round(pnl_pct, 2),
-                    exit_reason=exit_reason,
-                ))
+                    peak_capital = max(peak_capital, capital)
+                    dd = ((peak_capital - capital) / peak_capital) * 100
+                    max_drawdown = max(max_drawdown, dd)
+                    closed_indices.append(idx)
 
-                # Track drawdown
-                peak_capital = max(peak_capital, capital)
-                dd = ((peak_capital - capital) / peak_capital) * 100
-                max_drawdown = max(max_drawdown, dd)
+            # Remove closed positions (reverse order to preserve indices)
+            for idx in reversed(closed_indices):
+                open_positions.pop(idx)
 
-                in_trade = False
-
-            elif row["signal"] != 0 and not in_trade:
-                # Open new trade
+            # Open new trade on signal (allow multiple concurrent)
+            if row["signal"] != 0:
                 atr = row["atr"]
-                trade_entry = row["close"]
-                trade_entry_date = row.name
+                entry = row["close"]
 
                 if row["signal"] == 1:
-                    trade_side = "LONG"
-                    trade_sl = trade_entry - atr * self.risk_config["stop_loss"]["atr_multiplier"]
-                    trade_tp = trade_entry + atr * self.risk_config["take_profit"]["atr_multiplier"]
-                    highest_price = trade_entry
+                    side = "LONG"
+                    sl = entry - atr * self.risk_config["stop_loss"]["atr_multiplier"]
+                    tp = entry + atr * self.risk_config["take_profit"]["atr_multiplier"]
+                    highest = entry
                 else:
-                    trade_side = "SHORT"
-                    trade_sl = trade_entry + atr * self.risk_config["stop_loss"]["atr_multiplier"]
-                    trade_tp = trade_entry - atr * self.risk_config["take_profit"]["atr_multiplier"]
-                    highest_price = trade_entry
+                    side = "SHORT"
+                    sl = entry + atr * self.risk_config["stop_loss"]["atr_multiplier"]
+                    tp = entry - atr * self.risk_config["take_profit"]["atr_multiplier"]
+                    highest = entry
 
                 # Ensure minimum RR
-                risk = abs(trade_entry - trade_sl)
-                reward = abs(trade_tp - trade_entry)
+                risk = abs(entry - sl)
+                reward = abs(tp - entry)
                 if risk > 0 and reward / risk < self.risk_config["risk_reward_ratio"]:
-                    trade_tp = trade_entry + (risk * self.risk_config["risk_reward_ratio"]) if trade_side == "LONG" \
-                        else trade_entry - (risk * self.risk_config["risk_reward_ratio"])
+                    tp = entry + (risk * self.risk_config["risk_reward_ratio"]) if side == "LONG" \
+                        else entry - (risk * self.risk_config["risk_reward_ratio"])
 
                 # Position sizing
-                risk_per_share = abs(trade_entry - trade_sl)
+                risk_per_share = abs(entry - sl)
                 max_risk = capital * (self.risk_config["max_risk_per_trade_pct"] / 100)
-                trade_qty = max(1, int(max_risk / risk_per_share)) if risk_per_share > 0 else 0
+                qty = max(1, int(max_risk / risk_per_share)) if risk_per_share > 0 else 0
 
-                if trade_qty > 0:
-                    in_trade = True
+                if qty > 0:
+                    open_positions.append({
+                        "entry": entry,
+                        "entry_date": row.name,
+                        "side": side,
+                        "sl": sl,
+                        "tp": tp,
+                        "qty": qty,
+                        "highest_price": highest,
+                    })
 
-        # Close any remaining trade at last price
-        if in_trade:
+        # Close any remaining open positions at last price
+        if open_positions:
             last_row = df.iloc[-1]
-            exit_price = last_row["close"]
-            pnl = ((exit_price - trade_entry) if trade_side == "LONG" else (trade_entry - exit_price)) * trade_qty
-            pnl_pct = (pnl / (trade_entry * trade_qty)) * 100
-            capital += pnl
-            trades.append(BacktestTrade(
-                entry_date=str(trade_entry_date),
-                exit_date=str(last_row.name),
-                side=trade_side,
-                entry_price=trade_entry,
-                exit_price=exit_price,
-                stop_loss=trade_sl,
-                take_profit=trade_tp,
-                quantity=trade_qty,
-                pnl=round(pnl, 2),
-                pnl_pct=round(pnl_pct, 2),
-                exit_reason="END",
-            ))
+            for pos in open_positions:
+                exit_price = last_row["close"]
+                if pos["side"] == "LONG":
+                    pnl = (exit_price - pos["entry"]) * pos["qty"]
+                else:
+                    pnl = (pos["entry"] - exit_price) * pos["qty"]
+                pnl_pct = (pnl / (pos["entry"] * pos["qty"])) * 100
+                capital += pnl
+                trades.append(BacktestTrade(
+                    entry_date=str(pos["entry_date"]),
+                    exit_date=str(last_row.name),
+                    side=pos["side"],
+                    entry_price=pos["entry"],
+                    exit_price=exit_price,
+                    stop_loss=pos["sl"],
+                    take_profit=pos["tp"],
+                    quantity=pos["qty"],
+                    pnl=round(pnl, 2),
+                    pnl_pct=round(pnl_pct, 2),
+                    exit_reason="END",
+                ))
 
         # Calculate stats
         winning = [t for t in trades if t.pnl > 0]
