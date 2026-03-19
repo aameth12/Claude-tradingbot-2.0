@@ -30,7 +30,7 @@ trading:
 risk:
   risk_reward_ratio: 2.0         # minimum reward:risk (1:2 means 2.0 here)
   max_risk_per_trade_pct: 1.0    # max % of portfolio to risk per trade
-  max_daily_loss_pct: 3.0        # stop trading if daily loss exceeds this %
+  max_daily_loss_pct: 10.0       # stop trading if daily loss exceeds this % of portfolio
   trailing_stop:
     enabled: true
     activation_pct: 1.0          # activate trailing stop after 1% profit

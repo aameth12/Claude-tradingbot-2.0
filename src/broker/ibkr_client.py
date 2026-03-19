@@ -163,20 +163,23 @@ class IBKRClient:
         exit_action = "BUY" if action == "SELL" else "SELL"
         oca_group = f"OCA_{symbol}_{self.ib.client.getReqId()}"
 
-        # 1. Entry limit order
+        # 1. Entry limit order (DAY = valid for current session)
         entry_order = LimitOrder(action, quantity, limit_price)
+        entry_order.tif = "DAY"
         entry_trade = self.ib.placeOrder(contract, entry_order)
 
-        # 2. Take profit limit order (OCA group)
+        # 2. Take profit limit order (OCA group, GTC = good till cancelled)
         tp_order = LimitOrder(exit_action, quantity, take_profit_price)
         tp_order.ocaGroup = oca_group
         tp_order.ocaType = 1  # Cancel other orders in group
+        tp_order.tif = "GTC"
         tp_trade = self.ib.placeOrder(contract, tp_order)
 
-        # 3. Stop loss order (OCA group)
+        # 3. Stop loss order (OCA group, GTC)
         sl_order = StopOrder(exit_action, quantity, stop_loss_price)
         sl_order.ocaGroup = oca_group
         sl_order.ocaType = 1
+        sl_order.tif = "GTC"
         sl_trade = self.ib.placeOrder(contract, sl_order)
 
         await asyncio.sleep(0.5)

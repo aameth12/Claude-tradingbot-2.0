@@ -114,8 +114,8 @@ class RiskManager:
 
         return current_stop
 
-    def check_daily_loss_limit(self) -> bool:
-        """Check if daily loss limit has been hit."""
+    def check_daily_loss_limit(self, portfolio_value: float = 100000) -> bool:
+        """Check if daily loss limit has been hit (percentage of portfolio)."""
         session = get_session()
         try:
             today = date.today().isoformat()
@@ -127,11 +127,13 @@ class RiskManager:
             )
             daily_pnl = sum(t.pnl or 0 for t in trades)
 
-            # We need portfolio value - approximate with total position value
-            # In production, get this from the broker
-            max_loss = self.config["max_daily_loss_pct"]
-            if daily_pnl < 0 and abs(daily_pnl) > max_loss:
-                logger.warning("Daily loss limit hit: $%.2f", daily_pnl)
+            max_loss_pct = self.config["max_daily_loss_pct"]
+            max_loss_dollars = portfolio_value * (max_loss_pct / 100)
+            if daily_pnl < 0 and abs(daily_pnl) > max_loss_dollars:
+                logger.warning(
+                    "Daily loss limit hit: $%.2f (max: $%.2f = %.1f%% of $%.0f)",
+                    daily_pnl, max_loss_dollars, max_loss_pct, portfolio_value,
+                )
                 return True
             return False
         finally:
