@@ -16,10 +16,10 @@ from telegram.ext import (
 
 from src.utils.logger import setup_logger
 from src.utils.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, get_config, save_config
-from src.utils.database import get_session, Trade, DailySummary, BacktestResult
+from src.utils.database import get_session, Trade
 from src.utils.performance_tracker import PerformanceTracker
 from src.backtest.backtester import Backtester
-from src.utils.version import VERSION, VERSION_NAME, CHANGELOG, get_version_string
+
 
 logger = setup_logger("telegram")
 
@@ -44,202 +44,254 @@ class TradingBot:
             await update.message.reply_text("Unauthorized.")
             return
         msg = (
-            "AI Trading Bot Commands:\n\n"
-            "/status - Bot status & open positions\n"
-            "/pnl - Today's P&L summary\n"
-            "/trades - Recent trades\n"
-            "/watchlist - View watchlist\n"
-            "/add <SYMBOL> - Add to watchlist\n"
-            "/remove <SYMBOL> - Remove from watchlist\n"
-            "/backtest <SYMBOL> [period] - Backtest a stock\n"
-            "/summary - Daily summary\n"
-            "/positions - Open positions\n"
-            "/sellall - Close ALL open positions\n"
-            "/startbot - Start trading\n"
-            "/stopbot - Stop trading\n"
-            "/update - Git pull & restart bot\n"
-            "/performance - Overall performance stats\n"
-            "/regime - Current market regime & adjustments\n"
-            "/sentiment <SYMBOL> - Sentiment & earnings check\n"
-            "/review [ID] - Trade review (last trade if no ID)\n"
-            "/accuracy - Indicator accuracy stats\n"
-            "/targets - Daily performance targets & history\n"
-            "/sync - Sync DB with IBKR (detect missed trades)\n"
-            "/version - Version info & changelog\n"
-            "/help - Show this help"
+            "AI Trading Bot\n"
+            f"{'='*30}\n\n"
+            "📊 Dashboard & Info\n"
+            "  /dashboard  - Account overview & positions\n"
+            "  /market     - Market hours & status\n\n"
+            "📈 Analysis\n"
+            "  /regime          - Market regime & adjustments\n"
+            "  /sentiment <SYM> - Sentiment & earnings\n"
+            "  /review [ID]     - Trade review\n"
+            "  /accuracy        - Indicator accuracy\n"
+            "  /backtest <SYM>  - Backtest a symbol\n\n"
+            "📋 Watchlist\n"
+            "  /watchlist       - View watchlist\n"
+            "  /add <SYM>       - Add symbol\n"
+            "  /remove <SYM>    - Remove symbol\n\n"
+            "⚙️ Controls\n"
+            "  /startbot  - Start trading engine\n"
+            "  /stopbot   - Stop trading engine\n"
+            "  /sellall   - Close all positions\n"
+            "  /sync      - Sync DB with IBKR\n"
+            "  /update    - Git pull & restart"
         )
         await update.message.reply_text(msg)
 
-    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def dashboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Comprehensive account dashboard — pulls data from IBKR directly."""
         if not self._is_authorized(update):
             return
-        session = get_session()
-        try:
-            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
-            today_str = date.today().isoformat()
-            today_closed = session.query(Trade).filter(
-                Trade.status == "CLOSED", Trade.exit_time >= today_str
-            ).all()
 
-            config = get_config()
-            msg = (
-                f"Bot Status\n"
-                f"{'='*30}\n"
-                f"Mode: {config['trading']['mode']}\n"
-            )
+        config = get_config()
+        broker = self.trading_engine.broker if self.trading_engine else None
+        broker_connected = broker and broker.connected
 
-            # Show IBKR account data if connected
-            broker = self.trading_engine.broker if self.trading_engine else None
-            if broker and broker.connected:
-                try:
-                    account = await broker.get_account_pnl()
-                    msg += (
-                        f"Total Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
-                        f"Cash: ${account.get('TotalCashValue', 0):,.2f}\n"
-                        f"Unrealized P&L: ${account.get('UnrealizedPnL', 0):+,.2f}\n"
-                        f"Realized P&L: ${account.get('RealizedPnL', 0):+,.2f}\n"
-                        f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
-                    )
-                except Exception:
-                    pass
+        # --- Header: Market status + bot mode ---
+        market_line = ""
+        if self.trading_engine:
+            ms = self.trading_engine.get_market_status()
+            if ms["is_open"]:
+                close_str = ""
+                if ms["next_close"]:
+                    close_str = f" (closes {ms['next_close'].strftime('%I:%M %p ET')})"
+                market_line = f"Market: OPEN{close_str}"
+            else:
+                if ms["is_holiday"]:
+                    market_line = f"Market: CLOSED ({ms['holiday_name'] or 'Holiday'})"
+                else:
+                    market_line = "Market: CLOSED"
+                if ms["next_open"]:
+                    market_line += f"\nNext Open: {ms['next_open'].strftime('%a %b %d, %I:%M %p ET')}"
 
+        engine_status = "RUNNING" if (self.trading_engine and self.trading_engine.running) else "STOPPED"
+        msg = (
+            f"Dashboard\n"
+            f"{'='*30}\n"
+            f"{market_line}\n"
+            f"Mode: {config['trading']['mode']} | Engine: {engine_status}\n"
+        )
+
+        # --- Account section (from IBKR) ---
+        account = {}
+        if broker_connected:
+            try:
+                account = await broker.get_account_pnl()
+                msg += (
+                    f"\nAccount\n"
+                    f"{'-'*30}\n"
+                    f"Total Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
+                    f"Cash: ${account.get('TotalCashValue', 0):,.2f}\n"
+                    f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
+                )
+            except Exception:
+                msg += "\nAccount: (IBKR data unavailable)\n"
+        else:
+            msg += "\nAccount: (IBKR disconnected)\n"
+
+        # --- Today's P&L (from IBKR — resets daily) ---
+        if account:
+            realized = account.get('RealizedPnL', 0)
+            unrealized = account.get('UnrealizedPnL', 0)
             msg += (
-                f"Open Positions: {len(open_trades)}/{config['trading']['max_open_positions']}\n"
-                f"Today's Trades: {len(today_closed)}/{config['trading']['max_daily_trades']}\n"
-                f"Watchlist: {', '.join(config['watchlist'])}\n"
+                f"\nToday's P&L\n"
+                f"{'-'*30}\n"
+                f"Realized: ${realized:+,.2f}\n"
+                f"Unrealized: ${unrealized:+,.2f}\n"
+                f"Total: ${realized + unrealized:+,.2f}\n"
             )
 
-            if open_trades:
-                msg += f"\nOpen Positions:\n"
-                total_unrealized = 0
-
-                # Build price lookup from IBKR portfolio (one call for all positions)
-                portfolio_lookup = {}
-                if broker and broker.connected:
-                    try:
-                        portfolio = await broker.get_portfolio()
-                        for p in portfolio:
-                            portfolio_lookup[p["symbol"]] = p
-                    except Exception:
-                        pass
-
-                for t in open_trades:
-                    current_price = None
-                    ibkr_pnl = None
-
-                    # Use IBKR portfolio data (preferred — one call, accurate P&L)
-                    if t.symbol in portfolio_lookup:
-                        p = portfolio_lookup[t.symbol]
-                        current_price = p["market_price"]
-                        ibkr_pnl = p["unrealized_pnl"]
-
-                    # Fallback to individual market data
-                    if not current_price and broker and broker.connected:
-                        try:
-                            market_data = await broker.get_market_data(t.symbol)
-                            current_price = market_data.get("last") or market_data.get("close")
-                        except Exception:
-                            pass
-
-                    # Fallback to yfinance
-                    if not current_price and self.trading_engine:
-                        try:
-                            current_price = self.trading_engine.tv_analyzer.get_current_price(t.symbol)
-                        except Exception:
-                            pass
-
-                    if current_price:
-                        # Use IBKR P&L if available, otherwise calculate
-                        if ibkr_pnl is not None:
-                            pnl = ibkr_pnl
-                        elif t.side == "LONG":
-                            pnl = (current_price - t.entry_price) * t.quantity
-                        else:
-                            pnl = (t.entry_price - current_price) * t.quantity
-                        pnl_pct = (pnl / (t.entry_price * t.quantity)) * 100
-                        total_unrealized += pnl
-                        msg += (
-                            f"  {t.side} {t.symbol} @ ${t.entry_price:.2f}\n"
-                            f"    Now: ${current_price:.2f} | P&L: ${pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
-                            f"    SL: ${t.stop_loss:.2f} | TP: ${t.take_profit:.2f}\n"
-                        )
-                    else:
-                        msg += f"  {t.side} {t.symbol} @ ${t.entry_price:.2f} | SL: ${t.stop_loss:.2f} | TP: ${t.take_profit:.2f}\n"
-
-                if total_unrealized != 0:
-                    msg += f"\n  Total Unrealized P&L: ${total_unrealized:+,.2f}\n"
-
-            await update.message.reply_text(msg)
-        finally:
-            session.close()
-
-    async def pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
+        # --- All-time stats (from bot DB) ---
         session = get_session()
         try:
-            today_str = date.today().isoformat()
-            trades = session.query(Trade).filter(
-                Trade.status == "CLOSED", Trade.exit_time >= today_str
-            ).all()
+            all_closed = session.query(Trade).filter(Trade.status == "CLOSED").all()
+            if all_closed:
+                total_pnl = sum(t.pnl or 0 for t in all_closed)
+                winners = [t for t in all_closed if (t.pnl or 0) > 0]
+                losers = [t for t in all_closed if (t.pnl or 0) <= 0]
+                total_wins = sum(t.pnl or 0 for t in winners)
+                total_losses = abs(sum(t.pnl or 0 for t in losers))
 
-            total_pnl = sum(t.pnl or 0 for t in trades)
-            winners = [t for t in trades if (t.pnl or 0) > 0]
-            losers = [t for t in trades if (t.pnl or 0) <= 0]
+                msg += (
+                    f"\nAll-Time (Bot Tracked)\n"
+                    f"{'-'*30}\n"
+                    f"Total Trades: {len(all_closed)}"
+                    f" | Win Rate: {len(winners)/len(all_closed)*100:.1f}%\n"
+                    f"Total P&L: ${total_pnl:+,.2f}\n"
+                )
+                if total_losses > 0:
+                    msg += f"Profit Factor: {total_wins/total_losses:.2f}\n"
 
-            msg = (
-                f"Today's P&L\n"
-                f"{'='*30}\n"
-                f"Total P&L: ${total_pnl:+,.2f}\n"
-                f"Trades: {len(trades)}\n"
-                f"Winners: {len(winners)}\n"
-                f"Losers: {len(losers)}\n"
-                f"Win Rate: {len(winners)/len(trades)*100:.1f}%\n" if trades else
-                f"Today's P&L\n{'='*30}\nNo trades today.\n"
-            )
-
-            if trades:
-                msg += "\nTrade Details:\n"
-                for t in trades:
-                    emoji = "+" if (t.pnl or 0) > 0 else ""
-                    msg += f"  {t.side} {t.symbol}: ${t.pnl or 0:{emoji},.2f}\n"
-
-            # Show IBKR's actual account P&L
-            broker = self.trading_engine.broker if self.trading_engine else None
-            if broker and broker.connected:
+            # --- Open positions (from IBKR portfolio) ---
+            portfolio = []
+            if broker_connected:
                 try:
-                    account = await broker.get_account_pnl()
-                    msg += (
-                        f"\nIBKR Account P&L:\n"
-                        f"  Realized: ${account.get('RealizedPnL', 0):+,.2f}\n"
-                        f"  Unrealized: ${account.get('UnrealizedPnL', 0):+,.2f}\n"
-                        f"  Net Liquidation: ${account.get('NetLiquidation', 0):,.2f}\n"
-                    )
+                    portfolio = await broker.get_portfolio()
+                    portfolio = [p for p in portfolio if p["position"] != 0]
                 except Exception:
                     pass
 
-            await update.message.reply_text(msg)
+            if portfolio:
+                total_unrealized = sum(p["unrealized_pnl"] for p in portfolio)
+                msg += (
+                    f"\nOpen Positions ({len(portfolio)})\n"
+                    f"{'-'*30}\n"
+                )
+                for p in portfolio:
+                    side = "LONG" if p["position"] > 0 else "SHORT"
+                    qty = abs(int(p["position"]))
+                    pnl_val = p["unrealized_pnl"]
+                    pnl_pct = (pnl_val / (p["average_cost"] * qty)) * 100 if p["average_cost"] and qty else 0
+                    msg += (
+                        f"  {side} {p['symbol']} x{qty} @ ${p['average_cost']:.2f}\n"
+                        f"    Now: ${p['market_price']:.2f}"
+                        f" | P&L: ${pnl_val:+,.2f} ({pnl_pct:+.1f}%)\n"
+                    )
+                msg += f"  Total Unrealized: ${total_unrealized:+,.2f}\n"
+            else:
+                # Fallback to DB if IBKR not available
+                open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
+                if open_trades:
+                    msg += (
+                        f"\nOpen Positions ({len(open_trades)})\n"
+                        f"{'-'*30}\n"
+                    )
+                    for t in open_trades:
+                        msg += f"  {t.side} {t.symbol} x{t.quantity} @ ${t.entry_price:.2f}\n"
+                else:
+                    msg += "\nNo open positions.\n"
+
+            # Split message if too long for Telegram (4096 char limit)
+            if len(msg) > 3800:
+                await update.message.reply_text(msg)
+                msg = ""
+
+            # --- Today's executions (from IBKR) ---
+            if broker_connected:
+                try:
+                    executions = await broker.get_executions()
+                    today_dt = datetime.utcnow().date()
+                    today_execs = [
+                        e for e in executions
+                        if hasattr(e["time"], "date") and e["time"].date() == today_dt
+                    ]
+                    if today_execs:
+                        exec_msg = (
+                            f"\nToday's Executions ({len(today_execs)})\n"
+                            f"{'-'*30}\n"
+                        )
+                        for e in today_execs[-10:]:  # Last 10
+                            time_str = e["time"].strftime("%H:%M") if hasattr(e["time"], "strftime") else ""
+                            exec_msg += (
+                                f"  {e['side']} {int(e['quantity'])} {e['symbol']}"
+                                f" @ ${e['price']:.2f} [{time_str}]\n"
+                            )
+                        msg += exec_msg
+                except Exception:
+                    pass
+
+            # --- Performance targets ---
+            try:
+                today_targets = self.performance_tracker.get_today_targets()
+                targets_msg = (
+                    f"\nTargets\n"
+                    f"{'-'*30}\n"
+                )
+                if today_targets.get("win_rate_actual") is not None:
+                    wr_icon = "HIT" if today_targets["win_rate_hit"] else "MISS"
+                    pnl_icon = "HIT" if today_targets["pnl_pct_hit"] else "MISS"
+                    targets_msg += (
+                        f"  Win Rate: {today_targets['win_rate_actual']:.1f}%"
+                        f" / {today_targets['win_rate_target']:.1f}% [{wr_icon}]\n"
+                        f"  P&L: {today_targets['pnl_pct_actual']:+.2f}%"
+                        f" / {today_targets['pnl_pct_target']:+.2f}% [{pnl_icon}]\n"
+                    )
+                else:
+                    targets_msg += (
+                        f"  Win Rate Target: {today_targets['win_rate_target']:.1f}%\n"
+                        f"  P&L Target: {today_targets['pnl_pct_target']:+.2f}%\n"
+                    )
+                if today_targets.get("streak", 0) > 0:
+                    targets_msg += f"  Streak: {today_targets['streak']} day(s)\n"
+                msg += targets_msg
+            except Exception:
+                pass
+
+            if msg:
+                await update.message.reply_text(msg)
         finally:
             session.close()
 
-    async def trades_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def market(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show current market status with holiday awareness."""
         if not self._is_authorized(update):
             return
-        session = get_session()
-        try:
-            recent = session.query(Trade).order_by(Trade.entry_time.desc()).limit(10).all()
-            if not recent:
-                await update.message.reply_text("No trades recorded yet.")
-                return
 
-            msg = "Recent Trades (last 10)\n" + "=" * 30 + "\n"
-            for t in recent:
-                pnl_str = f"${t.pnl:+,.2f}" if t.pnl is not None else "Open"
-                msg += f"{t.side} {t.symbol} | Entry: ${t.entry_price:.2f} | {pnl_str} | {t.status}\n"
+        if not self.trading_engine:
+            await update.message.reply_text("Trading engine not initialized.")
+            return
 
-            await update.message.reply_text(msg)
-        finally:
-            session.close()
+        ms = self.trading_engine.get_market_status()
+        now = ms["current_time"]
+
+        msg = (
+            f"Market Status\n"
+            f"{'='*30}\n"
+        )
+
+        if ms["is_open"]:
+            msg += f"US Stock Market: OPEN\n"
+            msg += f"Current Time: {now.strftime('%I:%M %p ET')}\n"
+            if ms["next_close"]:
+                delta = ms["next_close"] - now
+                hours, remainder = divmod(int(delta.total_seconds()), 3600)
+                minutes = remainder // 60
+                msg += f"\nCloses: {ms['next_close'].strftime('%I:%M %p ET')} ({hours}h {minutes}m)\n"
+        else:
+            msg += f"US Stock Market: CLOSED\n"
+            if ms["is_holiday"]:
+                msg += f"Reason: {ms['holiday_name'] or 'Market Holiday'}\n"
+            msg += f"Current Time: {now.strftime('%I:%M %p ET')}\n"
+            if ms["next_open"]:
+                delta = ms["next_open"] - now
+                total_hours = int(delta.total_seconds()) // 3600
+                minutes = (int(delta.total_seconds()) % 3600) // 60
+                msg += (
+                    f"\nNext Open: {ms['next_open'].strftime('%a %b %d, %I:%M %p ET')}"
+                    f" (in {total_hours}h {minutes}m)\n"
+                )
+
+        await update.message.reply_text(msg)
 
     async def watchlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
@@ -298,121 +350,6 @@ class TradingBot:
             await update.message.reply_text(msg)
         except Exception as e:
             await update.message.reply_text(f"Backtest failed: {e}")
-
-    async def summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
-        session = get_session()
-        try:
-            today_str = date.today().isoformat()
-            trades = session.query(Trade).filter(Trade.exit_time >= today_str).all()
-            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
-
-            closed = [t for t in trades if t.status == "CLOSED"]
-            total_pnl = sum(t.pnl or 0 for t in closed)
-            winners = [t for t in closed if (t.pnl or 0) > 0]
-
-            msg = (
-                f"Daily Summary - {today_str}\n"
-                f"{'='*40}\n\n"
-                f"Closed Trades: {len(closed)}\n"
-                f"Open Positions: {len(open_trades)}\n"
-                f"Total P&L: ${total_pnl:+,.2f}\n"
-                f"Win Rate: {len(winners)/len(closed)*100:.1f}%\n" if closed else
-                f"Daily Summary - {today_str}\n{'='*40}\n\nNo closed trades today.\n"
-                f"Open Positions: {len(open_trades)}\n"
-            )
-
-            if closed:
-                best = max(closed, key=lambda t: t.pnl or 0)
-                worst = min(closed, key=lambda t: t.pnl or 0)
-                msg += f"\nBest Trade: {best.side} {best.symbol} ${best.pnl:+,.2f}\n"
-                msg += f"Worst Trade: {worst.side} {worst.symbol} ${worst.pnl:+,.2f}\n"
-
-            if open_trades:
-                msg += f"\nOpen Positions:\n"
-                for t in open_trades:
-                    msg += f"  {t.side} {t.symbol} @ ${t.entry_price:.2f}\n"
-
-            await update.message.reply_text(msg)
-        finally:
-            session.close()
-
-    async def positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
-        session = get_session()
-        try:
-            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
-            if not open_trades:
-                await update.message.reply_text("No open positions.")
-                return
-
-            msg = f"Open Positions ({len(open_trades)})\n{'='*40}\n"
-            for t in open_trades:
-                msg += (
-                    f"\n{t.side} {t.symbol}\n"
-                    f"  Entry: ${t.entry_price:.2f} | Qty: {t.quantity}\n"
-                    f"  SL: ${t.stop_loss:.2f} | TP: ${t.take_profit:.2f}\n"
-                    f"  Entered: {t.entry_time}\n"
-                )
-            await update.message.reply_text(msg)
-        finally:
-            session.close()
-
-    async def performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._is_authorized(update):
-            return
-        session = get_session()
-        try:
-            all_closed = session.query(Trade).filter(Trade.status == "CLOSED").all()
-            if not all_closed:
-                await update.message.reply_text("No completed trades yet.")
-                return
-
-            total_pnl = sum(t.pnl or 0 for t in all_closed)
-            winners = [t for t in all_closed if (t.pnl or 0) > 0]
-            losers = [t for t in all_closed if (t.pnl or 0) <= 0]
-            total_wins = sum(t.pnl or 0 for t in winners)
-            total_losses = abs(sum(t.pnl or 0 for t in losers))
-
-            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
-
-            msg = (
-                f"Overall Performance\n"
-                f"{'='*40}\n\n"
-                f"Total Closed Trades: {len(all_closed)}\n"
-                f"Open Positions: {len(open_trades)}\n"
-                f"Win Rate: {len(winners)/len(all_closed)*100:.1f}%\n"
-                f"Total P&L (closed): ${total_pnl:+,.2f}\n"
-            )
-            if total_losses > 0:
-                msg += f"Profit Factor: {total_wins/total_losses:.2f}\n"
-            if winners:
-                msg += f"Avg Win: ${total_wins/len(winners):,.2f}\n"
-            if losers:
-                msg += f"Avg Loss: ${total_losses/len(losers):,.2f}\n"
-
-            # Show IBKR account data for comparison
-            broker = self.trading_engine.broker if self.trading_engine else None
-            if broker and broker.connected:
-                try:
-                    account = await broker.get_account_pnl()
-                    msg += (
-                        f"\nIBKR Account\n"
-                        f"{'-'*30}\n"
-                        f"Total Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
-                        f"Cash: ${account.get('TotalCashValue', 0):,.2f}\n"
-                        f"Unrealized P&L: ${account.get('UnrealizedPnL', 0):+,.2f}\n"
-                        f"Realized P&L: ${account.get('RealizedPnL', 0):+,.2f}\n"
-                        f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
-                    )
-                except Exception:
-                    pass
-
-            await update.message.reply_text(msg)
-        finally:
-            session.close()
 
     async def startbot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
@@ -560,21 +497,6 @@ class TradingBot:
         # Restart the bot process
         os.execv(sys.executable, [sys.executable, "main.py"])
 
-    async def version(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show current version and recent changelog."""
-        if not self._is_authorized(update):
-            return
-
-        msg = f"AI Trading Bot {get_version_string()}\n{'='*30}\n"
-
-        # Show last 3 versions
-        for entry in CHANGELOG[:3]:
-            msg += f"\nv{entry['version']} \"{entry['name']}\"\n"
-            for change in entry["changes"]:
-                msg += f"  - {change}\n"
-
-        await update.message.reply_text(msg)
-
     async def regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show current market regime."""
         if not self._is_authorized(update):
@@ -701,47 +623,6 @@ class TradingBot:
 
         await update.message.reply_text(msg)
 
-    async def targets(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show today's performance targets and recent history."""
-        if not self._is_authorized(update):
-            return
-
-        today = self.performance_tracker.get_today_targets()
-        history = self.performance_tracker.get_recent_history(days=5)
-
-        msg = (
-            f"Performance Targets\n"
-            f"{'='*30}\n\n"
-            f"Today ({today['date']}):\n"
-            f"  Win Rate Target: {today['win_rate_target']:.1f}%\n"
-            f"  P&L Target: {today['pnl_pct_target']:+.2f}%\n"
-        )
-
-        if today["win_rate_actual"] is not None:
-            wr_icon = "HIT" if today["win_rate_hit"] else "MISS"
-            pnl_icon = "HIT" if today["pnl_pct_hit"] else "MISS"
-            msg += (
-                f"\n  Actual Win Rate: {today['win_rate_actual']:.1f}% [{wr_icon}]\n"
-                f"  Actual P&L: {today['pnl_pct_actual']:+.2f}% [{pnl_icon}]\n"
-            )
-
-        if today.get("streak", 0) > 0:
-            msg += f"\n  Streak: {today['streak']} day(s) hitting both targets!\n"
-
-        # Recent days
-        past = [h for h in history if h["date"] != today["date"] and h["win_rate_actual"] is not None]
-        if past:
-            msg += f"\nRecent History:\n"
-            for h in past[:5]:
-                wr_status = "HIT" if h["win_rate_hit"] else "MISS"
-                pnl_status = "HIT" if h["pnl_pct_hit"] else "MISS"
-                msg += (
-                    f"  {h['date']}: WR {h['win_rate_actual']:.0f}%/{h['win_rate_target']:.0f}% [{wr_status}]"
-                    f" | P&L {h['pnl_pct_actual']:+.1f}%/{h['pnl_pct_target']:+.1f}% [{pnl_status}]\n"
-                )
-
-        await update.message.reply_text(msg)
-
     async def sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Reconcile bot's database with IBKR's actual state."""
         if not self._is_authorized(update):
@@ -815,28 +696,29 @@ class TradingBot:
     def build_app(self) -> Application:
         self.app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+        # Dashboard & Info
         self.app.add_handler(CommandHandler("start", self.start))
-        self.app.add_handler(CommandHandler("status", self.status))
-        self.app.add_handler(CommandHandler("pnl", self.pnl))
-        self.app.add_handler(CommandHandler("trades", self.trades_cmd))
-        self.app.add_handler(CommandHandler("watchlist", self.watchlist))
-        self.app.add_handler(CommandHandler("add", self.add_symbol))
-        self.app.add_handler(CommandHandler("remove", self.remove_symbol))
-        self.app.add_handler(CommandHandler("backtest", self.backtest))
-        self.app.add_handler(CommandHandler("summary", self.summary))
-        self.app.add_handler(CommandHandler("positions", self.positions))
-        self.app.add_handler(CommandHandler("performance", self.performance))
-        self.app.add_handler(CommandHandler("sellall", self.sellall))
-        self.app.add_handler(CommandHandler("startbot", self.startbot))
-        self.app.add_handler(CommandHandler("stopbot", self.stopbot))
-        self.app.add_handler(CommandHandler("update", self.update))
-        self.app.add_handler(CommandHandler("version", self.version))
+        self.app.add_handler(CommandHandler("dashboard", self.dashboard))
+        self.app.add_handler(CommandHandler("market", self.market))
+
+        # Analysis
         self.app.add_handler(CommandHandler("regime", self.regime))
         self.app.add_handler(CommandHandler("sentiment", self.sentiment_cmd))
         self.app.add_handler(CommandHandler("review", self.review_cmd))
         self.app.add_handler(CommandHandler("accuracy", self.accuracy_cmd))
-        self.app.add_handler(CommandHandler("targets", self.targets))
+        self.app.add_handler(CommandHandler("backtest", self.backtest))
+
+        # Watchlist
+        self.app.add_handler(CommandHandler("watchlist", self.watchlist))
+        self.app.add_handler(CommandHandler("add", self.add_symbol))
+        self.app.add_handler(CommandHandler("remove", self.remove_symbol))
+
+        # Controls
+        self.app.add_handler(CommandHandler("startbot", self.startbot))
+        self.app.add_handler(CommandHandler("stopbot", self.stopbot))
+        self.app.add_handler(CommandHandler("sellall", self.sellall))
         self.app.add_handler(CommandHandler("sync", self.sync))
+        self.app.add_handler(CommandHandler("update", self.update))
         self.app.add_handler(CommandHandler("help", self.help_cmd))
 
         return self.app

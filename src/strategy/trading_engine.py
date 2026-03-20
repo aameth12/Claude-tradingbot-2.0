@@ -61,6 +61,77 @@ class TradingEngine:
         current_time = now.time()
         return self._market_open <= current_time <= self._market_close
 
+    def get_market_status(self) -> dict:
+        """Get detailed market status including holiday awareness."""
+        now = datetime.now(self._market_tz)
+        result = {
+            "is_open": False,
+            "current_time": now,
+            "next_open": None,
+            "next_close": None,
+            "is_holiday": False,
+            "holiday_name": None,
+        }
+
+        try:
+            import exchange_calendars as ecals
+            nyse = ecals.get_calendar("XNYS")
+            today = now.date()
+            today_ts = pd.Timestamp(today)
+
+            # Check if today is a trading day
+            if nyse.is_session(today_ts):
+                session_open = nyse.session_open(today_ts).astimezone(self._market_tz)
+                session_close = nyse.session_close(today_ts).astimezone(self._market_tz)
+                result["is_open"] = session_open.time() <= now.time() <= session_close.time()
+                if result["is_open"]:
+                    result["next_close"] = session_close
+                else:
+                    if now.time() < session_open.time():
+                        result["next_open"] = session_open
+                    else:
+                        # After close — find next session
+                        next_sessions = nyse.sessions_in_range(
+                            pd.Timestamp(today + pd.Timedelta(days=1)),
+                            pd.Timestamp(today + pd.Timedelta(days=7)),
+                        )
+                        if len(next_sessions) > 0:
+                            ns = next_sessions[0]
+                            result["next_open"] = nyse.session_open(ns).astimezone(self._market_tz)
+            else:
+                # Not a trading day (weekend or holiday)
+                if now.weekday() <= 4:
+                    result["is_holiday"] = True
+                    # Try to get holiday name
+                    try:
+                        holidays = nyse.holidays().holidays
+                        if today_ts.to_datetime64() in holidays:
+                            result["holiday_name"] = "Market Holiday"
+                    except Exception:
+                        result["holiday_name"] = "Market Holiday"
+
+                # Find next open session
+                next_sessions = nyse.sessions_in_range(
+                    pd.Timestamp(today + pd.Timedelta(days=1)),
+                    pd.Timestamp(today + pd.Timedelta(days=7)),
+                )
+                if len(next_sessions) > 0:
+                    ns = next_sessions[0]
+                    result["next_open"] = nyse.session_open(ns).astimezone(self._market_tz)
+
+        except Exception as e:
+            logger.debug("exchange_calendars not available, using simple check: %s", e)
+            # Fallback to simple time check
+            result["is_open"] = self._is_market_hours()
+            if result["is_open"]:
+                result["next_close"] = now.replace(
+                    hour=self._market_close.hour,
+                    minute=self._market_close.minute,
+                    second=0, microsecond=0,
+                )
+
+        return result
+
     def set_telegram_bot(self, bot):
         self.telegram_bot = bot
 
