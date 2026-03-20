@@ -103,6 +103,21 @@ class IndicatorAccuracy(Base):
     last_updated = Column(DateTime, default=datetime.utcnow)
 
 
+class PerformanceTarget(Base):
+    __tablename__ = "performance_targets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(String(10), nullable=False, unique=True, index=True)
+    win_rate_target = Column(Float, nullable=False, default=50.0)
+    pnl_pct_target = Column(Float, nullable=False, default=2.0)
+    win_rate_actual = Column(Float, nullable=True)
+    pnl_pct_actual = Column(Float, nullable=True)
+    win_rate_hit = Column(Boolean, nullable=True)
+    pnl_pct_hit = Column(Boolean, nullable=True)
+    streak = Column(Integer, default=0)  # consecutive days both targets hit
+    notes = Column(Text, nullable=True)
+
+
 def init_db():
     Base.metadata.create_all(engine)
     # Migrate existing tables: add exit_reason column if missing

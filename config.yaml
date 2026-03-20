@@ -151,6 +151,14 @@ vix_scaling:
     - vix_above: 0
       scale: 1.0
 
+# --- Performance Targets (auto-ratcheting daily goals) ---
+performance_targets:
+  initial_win_rate: 50.0           # starting win rate target (%)
+  initial_pnl_pct: 2.0            # starting daily P&L target (%)
+  win_rate_step: 2.0              # raise win rate target by this much when beating it
+  pnl_pct_step: 0.5              # raise P&L target by this much when beating it
+  lookback_days: 5                # compare against this many recent days
+
 # --- Broker (IB Gateway) ---
 broker:
   host: "127.0.0.1"

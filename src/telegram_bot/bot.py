@@ -17,6 +17,7 @@ from telegram.ext import (
 from src.utils.logger import setup_logger
 from src.utils.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, get_config
 from src.utils.database import get_session, Trade, DailySummary, BacktestResult
+from src.utils.performance_tracker import PerformanceTracker
 from src.backtest.backtester import Backtester
 from src.utils.version import VERSION, VERSION_NAME, CHANGELOG, get_version_string
 
@@ -30,6 +31,7 @@ class TradingBot:
         self.app = None
         self.trading_engine = trading_engine
         self.backtester = Backtester()
+        self.performance_tracker = PerformanceTracker()
         self.authorized_chat_id = TELEGRAM_CHAT_ID
 
     def _is_authorized(self, update: Update) -> bool:
@@ -61,6 +63,7 @@ class TradingBot:
             "/sentiment <SYMBOL> - Sentiment & earnings check\n"
             "/review [ID] - Trade review (last trade if no ID)\n"
             "/accuracy - Indicator accuracy stats\n"
+            "/targets - Daily performance targets & history\n"
             "/version - Version info & changelog\n"
             "/help - Show this help"
         )
@@ -584,6 +587,47 @@ class TradingBot:
 
         await update.message.reply_text(msg)
 
+    async def targets(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show today's performance targets and recent history."""
+        if not self._is_authorized(update):
+            return
+
+        today = self.performance_tracker.get_today_targets()
+        history = self.performance_tracker.get_recent_history(days=5)
+
+        msg = (
+            f"Performance Targets\n"
+            f"{'='*30}\n\n"
+            f"Today ({today['date']}):\n"
+            f"  Win Rate Target: {today['win_rate_target']:.1f}%\n"
+            f"  P&L Target: {today['pnl_pct_target']:+.2f}%\n"
+        )
+
+        if today["win_rate_actual"] is not None:
+            wr_icon = "HIT" if today["win_rate_hit"] else "MISS"
+            pnl_icon = "HIT" if today["pnl_pct_hit"] else "MISS"
+            msg += (
+                f"\n  Actual Win Rate: {today['win_rate_actual']:.1f}% [{wr_icon}]\n"
+                f"  Actual P&L: {today['pnl_pct_actual']:+.2f}% [{pnl_icon}]\n"
+            )
+
+        if today.get("streak", 0) > 0:
+            msg += f"\n  Streak: {today['streak']} day(s) hitting both targets!\n"
+
+        # Recent days
+        past = [h for h in history if h["date"] != today["date"] and h["win_rate_actual"] is not None]
+        if past:
+            msg += f"\nRecent History:\n"
+            for h in past[:5]:
+                wr_status = "HIT" if h["win_rate_hit"] else "MISS"
+                pnl_status = "HIT" if h["pnl_pct_hit"] else "MISS"
+                msg += (
+                    f"  {h['date']}: WR {h['win_rate_actual']:.0f}%/{h['win_rate_target']:.0f}% [{wr_status}]"
+                    f" | P&L {h['pnl_pct_actual']:+.1f}%/{h['pnl_pct_target']:+.1f}% [{pnl_status}]\n"
+                )
+
+        await update.message.reply_text(msg)
+
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self.start(update, context)
 
@@ -610,6 +654,7 @@ class TradingBot:
         self.app.add_handler(CommandHandler("sentiment", self.sentiment_cmd))
         self.app.add_handler(CommandHandler("review", self.review_cmd))
         self.app.add_handler(CommandHandler("accuracy", self.accuracy_cmd))
+        self.app.add_handler(CommandHandler("targets", self.targets))
         self.app.add_handler(CommandHandler("help", self.help_cmd))
 
         return self.app

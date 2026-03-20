@@ -14,6 +14,7 @@ from src.risk.risk_manager import RiskManager
 from src.risk.correlation_filter import CorrelationFilter
 from src.agents.agent_manager import AgentManager
 from src.utils.database import get_session, Trade, DailySummary, init_db
+from src.utils.performance_tracker import PerformanceTracker
 from src.utils.logger import setup_logger
 from src.utils.config import get_config
 
@@ -39,6 +40,7 @@ class TradingEngine:
         self._price_extremes = {}  # {symbol: highest_or_lowest_price}
         self._cached_portfolio_value = None  # Cached per scan cycle
         self._current_regime = None  # Cached market regime
+        self.performance_tracker = PerformanceTracker()
 
         init_db()
 
@@ -554,6 +556,15 @@ class TradingEngine:
                     f"Worst: ${summary.worst_trade_pnl:+,.2f}\n"
                 )
                 await self.telegram_bot.send_notification(msg)
+
+            # Evaluate daily performance against targets
+            try:
+                portfolio_value = self._cached_portfolio_value or 100000
+                result = self.performance_tracker.evaluate_day(portfolio_value)
+                if result.get("trades", 0) > 0 and self.telegram_bot:
+                    await self.telegram_bot.send_notification(result["message"])
+            except Exception as e:
+                logger.error("Performance target evaluation failed: %s", e)
 
         finally:
             session.close()
