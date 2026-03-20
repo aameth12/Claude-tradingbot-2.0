@@ -392,8 +392,11 @@ class TradingEngine:
                     # Only update if the change is meaningful (>$0.10)
                     # to avoid micro-adjustments from bid/ask noise
                     sl_diff = abs(new_sl - trade.stop_loss)
-                    if sl_diff > 0.10 and new_sl != trade.stop_loss and trade.order_id:
-                        success = await self.broker.modify_stop_loss(trade.order_id, new_sl)
+                    if sl_diff > 0.10 and new_sl != trade.stop_loss:
+                        if trade.order_id:
+                            success = await self.broker.modify_stop_loss(trade.order_id, new_sl)
+                        else:
+                            success = True  # Paper mode — no broker order to modify
                         if success:
                             trade.stop_loss = new_sl
                             session.commit()
