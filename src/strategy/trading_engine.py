@@ -1,7 +1,8 @@
 import asyncio
 import json
-from datetime import datetime, date
+from datetime import datetime, date, time as dt_time
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -41,6 +42,23 @@ class TradingEngine:
 
         init_db()
 
+        # Market hours config for gating expensive operations
+        tz_name = self.config["schedule"].get("timezone", "US/Eastern")
+        self._market_tz = ZoneInfo(tz_name)
+        open_parts = self.config["schedule"].get("market_open", "09:30").split(":")
+        close_parts = self.config["schedule"].get("market_close", "16:00").split(":")
+        self._market_open = dt_time(int(open_parts[0]), int(open_parts[1]))
+        self._market_close = dt_time(int(close_parts[0]), int(close_parts[1]))
+
+    def _is_market_hours(self) -> bool:
+        """Check if current time is within market hours (Mon-Fri, open-close)."""
+        now = datetime.now(self._market_tz)
+        # Weekday: 0=Mon, 4=Fri
+        if now.weekday() > 4:
+            return False
+        current_time = now.time()
+        return self._market_open <= current_time <= self._market_close
+
     def set_telegram_bot(self, bot):
         self.telegram_bot = bot
 
@@ -60,6 +78,10 @@ class TradingEngine:
         """Scan all watchlist symbols for trade opportunities."""
         if not self.running:
             logger.info("Engine not running, skipping scan")
+            return
+
+        if not self._is_market_hours():
+            logger.info("Outside market hours, skipping scan (no API calls)")
             return
 
         watchlist = self.config["watchlist"]
@@ -171,9 +193,9 @@ class TradingEngine:
             logger.warning("Missing ATR or price for %s", symbol)
             return None
 
-        # 5. AI chart analysis (if enabled)
+        # 5. AI chart analysis (if enabled and during market hours)
         ai_analysis = {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": "Disabled"}
-        if self.config["ai"]["chart_analysis_enabled"]:
+        if self.config["ai"]["chart_analysis_enabled"] and self._is_market_hours():
             try:
                 # Get historical bars from broker for chart generation
                 bars = await self.broker.get_historical_bars(

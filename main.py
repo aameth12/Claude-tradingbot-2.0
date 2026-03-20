@@ -170,7 +170,7 @@ async def run_bot():
     scheduler.start()
     logger.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
 
-    # Run an immediate scan on startup so we don't wait for the next scheduled tick
+    # Run an immediate scan on startup (skips automatically if outside market hours)
     logger.info("Running initial watchlist scan...")
     try:
         await engine.scan_watchlist()
