@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 from src.utils.logger import setup_logger
-from src.utils.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, get_config
+from src.utils.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, get_config, save_config
 from src.utils.database import get_session, Trade, DailySummary, BacktestResult
 from src.utils.performance_tracker import PerformanceTracker
 from src.backtest.backtester import Backtester
@@ -174,6 +174,7 @@ class TradingBot:
             await update.message.reply_text(f"{symbol} already in watchlist.")
             return
         config["watchlist"].append(symbol)
+        save_config()
         await update.message.reply_text(f"Added {symbol} to watchlist.")
 
     async def remove_symbol(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -188,6 +189,7 @@ class TradingBot:
             await update.message.reply_text(f"{symbol} not in watchlist.")
             return
         config["watchlist"].remove(symbol)
+        save_config()
         await update.message.reply_text(f"Removed {symbol} from watchlist.")
 
     async def backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
