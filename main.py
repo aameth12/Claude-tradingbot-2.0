@@ -158,6 +158,21 @@ async def run_bot():
         await telegram_app.updater.start_polling(drop_pending_updates=True)
         logger.info("Telegram bot started")
 
+        # Send startup notification
+        startup_msg = (
+            f"AI Trading Bot STARTED\n"
+            f"{'='*30}\n"
+            f"Mode: {TRADING_MODE}\n"
+            f"Watchlist: {', '.join(config['watchlist'])}\n"
+            f"Max Positions: {config['trading']['max_open_positions']}\n"
+            f"Scan Interval: {scan_interval}min\n"
+            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        try:
+            await telegram_bot.send_notification(startup_msg)
+        except Exception as e:
+            logger.warning("Failed to send startup notification: %s", e)
+
         # Keep running
         stop_event = asyncio.Event()
 

@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime, date
 
 from telegram import Update, BotCommand
@@ -48,8 +51,10 @@ class TradingBot:
             "/backtest <SYMBOL> [period] - Backtest a stock\n"
             "/summary - Daily summary\n"
             "/positions - Open positions\n"
+            "/sellall - Close ALL open positions\n"
             "/startbot - Start trading\n"
             "/stopbot - Stop trading\n"
+            "/update - Git pull & restart bot\n"
             "/performance - Overall performance stats\n"
             "/help - Show this help"
         )
@@ -304,6 +309,97 @@ class TradingBot:
         else:
             await update.message.reply_text("Trading engine not initialized.")
 
+    async def sellall(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Close all open positions at market price."""
+        if not self._is_authorized(update):
+            return
+        if not self.trading_engine:
+            await update.message.reply_text("Trading engine not initialized.")
+            return
+
+        session = get_session()
+        try:
+            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
+            if not open_trades:
+                await update.message.reply_text("No open positions to close.")
+                return
+
+            await update.message.reply_text(f"Closing {len(open_trades)} open position(s)...")
+
+            closed = 0
+            for trade in open_trades:
+                try:
+                    # Place market order to close
+                    action = "SELL" if trade.side == "LONG" else "BUY"
+                    entry_trade, fill_price = await self.trading_engine.broker.place_entry_order(
+                        symbol=trade.symbol,
+                        action=action,
+                        quantity=trade.quantity,
+                    )
+
+                    # Cancel any open SL/TP orders for this trade
+                    if trade.order_id:
+                        await self.trading_engine.broker.cancel_order(trade.order_id)
+
+                    # Calculate P&L
+                    if trade.side == "LONG":
+                        pnl = (fill_price - trade.entry_price) * trade.quantity
+                    else:
+                        pnl = (trade.entry_price - fill_price) * trade.quantity
+                    pnl_pct = (pnl / (trade.entry_price * trade.quantity)) * 100
+
+                    # Update trade in DB
+                    trade.exit_price = fill_price
+                    trade.exit_time = datetime.utcnow()
+                    trade.pnl = round(pnl, 2)
+                    trade.pnl_pct = round(pnl_pct, 2)
+                    trade.status = "CLOSED"
+                    trade.exit_reason = "MANUAL"
+                    session.commit()
+                    closed += 1
+
+                except Exception as e:
+                    logger.error("Failed to close %s %s: %s", trade.side, trade.symbol, e)
+                    await update.message.reply_text(f"Failed to close {trade.symbol}: {e}")
+
+            # Clean up price tracking
+            self.trading_engine._price_extremes.clear()
+
+            total_pnl = sum(t.pnl or 0 for t in open_trades if t.status == "CLOSED")
+            await update.message.reply_text(
+                f"Sell All Complete\n"
+                f"{'='*30}\n"
+                f"Closed: {closed}/{len(open_trades)} positions\n"
+                f"Total P&L: ${total_pnl:+,.2f}"
+            )
+        finally:
+            session.close()
+
+    async def update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Pull latest code from git and restart the bot."""
+        if not self._is_authorized(update):
+            return
+
+        await update.message.reply_text("Pulling latest code...")
+
+        # Run git pull
+        try:
+            result = subprocess.run(
+                ["git", "pull", "origin", "claude/ai-trading-bot-a1jC4"],
+                capture_output=True, text=True, timeout=30,
+                cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            )
+            git_output = result.stdout.strip() or result.stderr.strip()
+            await update.message.reply_text(f"Git pull:\n{git_output}")
+        except Exception as e:
+            await update.message.reply_text(f"Git pull failed: {e}")
+            return
+
+        await update.message.reply_text("Restarting bot...")
+
+        # Restart the bot process
+        os.execv(sys.executable, [sys.executable, "main.py"])
+
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self.start(update, context)
 
@@ -321,8 +417,10 @@ class TradingBot:
         self.app.add_handler(CommandHandler("summary", self.summary))
         self.app.add_handler(CommandHandler("positions", self.positions))
         self.app.add_handler(CommandHandler("performance", self.performance))
+        self.app.add_handler(CommandHandler("sellall", self.sellall))
         self.app.add_handler(CommandHandler("startbot", self.startbot))
         self.app.add_handler(CommandHandler("stopbot", self.stopbot))
+        self.app.add_handler(CommandHandler("update", self.update))
         self.app.add_handler(CommandHandler("help", self.help_cmd))
 
         return self.app
