@@ -144,25 +144,27 @@ async def run_bot():
 
     # Refresh market regime every 15 minutes during market hours
     scheduler.add_job(
-        lambda: asyncio.ensure_future(engine.agent_manager.get_market_regime(config["watchlist"])),
+        engine.agent_manager.get_market_regime,
         CronTrigger(
             day_of_week="mon-fri",
             hour="9-16",
             minute="*/15",
             timezone=config["schedule"]["timezone"],
         ),
+        args=[config["watchlist"]],
         id="refresh_regime",
         name="Refresh Market Regime",
     )
 
     # Refresh earnings calendar daily at 9:00 AM
     scheduler.add_job(
-        lambda: asyncio.ensure_future(engine.agent_manager.refresh_earnings_calendar(config["watchlist"])),
+        engine.agent_manager.refresh_earnings_calendar,
         CronTrigger(
             day_of_week="mon-fri",
             hour=9, minute=0,
             timezone=config["schedule"]["timezone"],
         ),
+        args=[config["watchlist"]],
         id="refresh_earnings",
         name="Refresh Earnings Calendar",
     )
