@@ -26,6 +26,12 @@ def get_config() -> dict:
     return _config
 
 
+def save_config() -> None:
+    """Persist current in-memory config to config.yaml."""
+    with open(CONFIG_PATH, "w") as f:
+        yaml.dump(_config, f, default_flow_style=False, sort_keys=False)
+
+
 def reload_config() -> dict:
     global _config
     _config = load_config()
