@@ -124,9 +124,8 @@ class RiskManager:
                             current_stop, new_stop, highest_price, atr,
                         )
                         return round(new_stop, 2)
-            return current_stop
 
-        # Percentage-based fallback
+        # Percentage-based fallback (also used when ATR threshold not yet met)
         if side == "LONG":
             profit_pct = ((current_price - entry_price) / entry_price) * 100
             if profit_pct >= ts_config["activation_pct"]:
