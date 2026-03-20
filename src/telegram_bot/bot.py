@@ -92,8 +92,34 @@ class TradingBot:
 
             if open_trades:
                 msg += f"\nOpen Positions:\n"
+                total_unrealized = 0
                 for t in open_trades:
-                    msg += f"  {t.side} {t.symbol} @ ${t.entry_price:.2f} | SL: ${t.stop_loss:.2f} | TP: ${t.take_profit:.2f}\n"
+                    # Fetch current price from broker
+                    current_price = None
+                    if self.trading_engine and self.trading_engine.broker:
+                        try:
+                            market_data = await self.trading_engine.broker.get_market_data(t.symbol)
+                            current_price = market_data.get("last") or market_data.get("close")
+                        except Exception:
+                            pass
+
+                    if current_price:
+                        if t.side == "LONG":
+                            pnl = (current_price - t.entry_price) * t.quantity
+                        else:
+                            pnl = (t.entry_price - current_price) * t.quantity
+                        pnl_pct = (pnl / (t.entry_price * t.quantity)) * 100
+                        total_unrealized += pnl
+                        msg += (
+                            f"  {t.side} {t.symbol} @ ${t.entry_price:.2f}\n"
+                            f"    Now: ${current_price:.2f} | P&L: ${pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
+                            f"    SL: ${t.stop_loss:.2f} | TP: ${t.take_profit:.2f}\n"
+                        )
+                    else:
+                        msg += f"  {t.side} {t.symbol} @ ${t.entry_price:.2f} | SL: ${t.stop_loss:.2f} | TP: ${t.take_profit:.2f}\n"
+
+                if total_unrealized != 0:
+                    msg += f"\n  Total Unrealized P&L: ${total_unrealized:+,.2f}\n"
 
             await update.message.reply_text(msg)
         finally:
