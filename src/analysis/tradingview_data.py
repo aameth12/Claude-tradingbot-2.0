@@ -249,11 +249,8 @@ def _generate_recommendation(df: pd.DataFrame, config: dict | None = None) -> st
         elif last["close"] < last["keltner_lower"]:
             sell_signals += 1  # Breakdown below = strong downtrend
 
-    # Volume confirmation — reduce signal strength on low volume
-    if pd.notna(last.get("volume")) and pd.notna(last.get("volume_sma20")):
-        if last["volume_sma20"] > 0 and last["volume"] < last["volume_sma20"]:
-            # Low volume: don't add to buy/sell, effectively penalizes
-            total += 1  # Counts as neutral (no buy/sell increment)
+    # Volume confirmation — only count if volume is meaningfully low
+    # (removed: adding neutral votes to denominator unfairly diluted all signals)
 
     if total == 0:
         return "NEUTRAL"
@@ -329,14 +326,23 @@ class TradingViewAnalyzer:
                     else:
                         neutral_count += 1
 
-            # EMA checks
+            # EMA alignment — single consolidated vote instead of per-EMA
+            ema_buy = 0
+            ema_sell = 0
             for ema in ["ema10", "ema20", "ema50"]:
                 val = last.get(ema)
                 if pd.notna(val):
                     if last["close"] > val:
-                        buy_count += 1
+                        ema_buy += 1
                     else:
-                        sell_count += 1
+                        ema_sell += 1
+            if ema_buy + ema_sell > 0:
+                if ema_buy > ema_sell:
+                    buy_count += 1
+                elif ema_sell > ema_buy:
+                    sell_count += 1
+                else:
+                    neutral_count += 1
 
             return {
                 "symbol": symbol,
