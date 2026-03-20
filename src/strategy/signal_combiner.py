@@ -69,17 +69,17 @@ class SignalCombiner:
 
         # ADX filter — no trend = no trade
         adx = indicators.get("adx")
-        if adx is not None and adx < 25:
-            logger.info("%s: ADX %.1f too low (< 25), no trend", symbol, adx)
+        if adx is not None and adx < 15:
+            logger.info("%s: ADX %.1f too low (< 15), no trend", symbol, adx)
             return None
 
         # Volume filter — weak volume = unreliable signal
         volume = indicators.get("volume")
         volume_sma = indicators.get("volume_sma20")
         if volume is not None and volume_sma is not None and volume_sma > 0:
-            if volume < volume_sma * 1.2:
+            if volume < volume_sma * 0.8:
                 logger.info(
-                    "%s: Volume %.0f below 1.2x SMA20 (%.0f), skipping",
+                    "%s: Volume %.0f below 0.8x SMA20 (%.0f), skipping",
                     symbol, volume, volume_sma,
                 )
                 return None

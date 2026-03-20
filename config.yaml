@@ -28,7 +28,7 @@ trading:
 
 # --- Risk Management ---
 risk:
-  risk_reward_ratio: 2.0         # minimum reward:risk (1:2 means 2.0 here)
+  risk_reward_ratio: 1.5         # minimum reward:risk (lowered from 2.0 for more trades)
   max_risk_per_trade_pct: 1.0    # max % of portfolio to risk per trade
   max_daily_loss_pct: 10.0       # stop trading if daily loss exceeds this % of portfolio
   trailing_stop:
@@ -76,7 +76,7 @@ ai:
   model: "claude-sonnet-4-20250514"
   chart_analysis_enabled: true
   chart_cache_minutes: 15        # cache chart analysis results to reduce API calls
-  confidence_threshold: 0.60     # min confidence to take a trade (was 0.45)
+  confidence_threshold: 0.45     # min confidence to take a trade (lowered from 0.60 for more trades)
 
 # --- Schedule ---
 schedule:
@@ -101,12 +101,12 @@ agents:
       ranging:
         sl_multiplier: 1.5
         tp_multiplier: 2.5
-        confidence_threshold: 0.70
+        confidence_threshold: 0.50
         position_scale: 0.7
       volatile:
         sl_multiplier: 3.0
         tp_multiplier: 4.0
-        confidence_threshold: 0.75
+        confidence_threshold: 0.55
         position_scale: 0.5
   news_sentiment:
     enabled: true
@@ -122,7 +122,7 @@ agents:
 correlation:
   enabled: true
   max_correlation: 0.75
-  max_sector_positions: 3
+  max_sector_positions: 5
   sectors:
     tech:
       - AAPL
