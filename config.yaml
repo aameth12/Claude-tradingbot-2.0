@@ -33,7 +33,7 @@ risk:
   max_daily_loss_pct: 10.0       # stop trading if daily loss exceeds this % of portfolio
   trailing_stop:
     enabled: true
-    activation_pct: 3.0          # activate trailing stop after 3% profit (was 1%)
+    activation_pct: 1.5          # activate trailing stop after 1.5% profit
     trail_pct: 1.5               # trail by 1.5% from high (was 0.5%)
   stop_loss:
     atr_multiplier: 2.0          # SL = entry +/- ATR * multiplier (was 1.5, wider to avoid noise)
