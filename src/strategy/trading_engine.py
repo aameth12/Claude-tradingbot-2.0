@@ -640,20 +640,76 @@ class TradingEngine:
                         "pnl": trade.pnl,
                     })
 
-            # 2. Find IBKR positions the bot doesn't track
+            # 2. Find IBKR positions the bot doesn't track — adopt them
             for symbol in ibkr_symbols:
                 if symbol not in db_symbols:
                     pos = next(p for p in portfolio if p["symbol"] == symbol)
+                    quantity = abs(pos["position"])
+                    side = "LONG" if pos["position"] > 0 else "SHORT"
+                    entry_price = pos["average_cost"]
+                    market_price = pos["market_price"]
+
+                    # Set default SL/TP based on config percentages
+                    config = get_config()
+                    sl_mult = config.get("risk", {}).get("stop_loss", {}).get("atr_multiplier", 2.0)
+                    tp_mult = config.get("risk", {}).get("take_profit", {}).get("atr_multiplier", 4.0)
+                    # Use percentage-based defaults (ATR not available, use ~2% SL, ~4% TP)
+                    sl_pct = sl_mult * 0.01
+                    tp_pct = tp_mult * 0.01
+
+                    if side == "LONG":
+                        stop_loss = round(entry_price * (1 - sl_pct), 2)
+                        take_profit = round(entry_price * (1 + tp_pct), 2)
+                    else:
+                        stop_loss = round(entry_price * (1 + sl_pct), 2)
+                        take_profit = round(entry_price * (1 - tp_pct), 2)
+
+                    # Create a Trade record so the bot tracks this position
+                    adopted_trade = Trade(
+                        symbol=symbol,
+                        side=side,
+                        entry_price=entry_price,
+                        quantity=int(quantity),
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        status="OPEN",
+                        strategy="adopted",
+                        timeframe="unknown",
+                        signals=json.dumps({"source": "orphan_adoption"}),
+                        notes=f"Auto-adopted from IBKR on {datetime.utcnow().isoformat()}",
+                    )
+                    session.add(adopted_trade)
+                    session.commit()
+
+                    # Initialize trailing stop tracking
+                    self._price_extremes[symbol] = market_price
+
+                    # Place protective SL + TP orders in IBKR
+                    try:
+                        exit_action = "SELL" if side == "LONG" else "BUY"
+                        tp_trade, sl_trade = await self.broker.place_exit_orders(
+                            symbol=symbol,
+                            exit_action=exit_action,
+                            quantity=int(quantity),
+                            stop_loss_price=stop_loss,
+                            take_profit_price=take_profit,
+                        )
+                        adopted_trade.order_id = sl_trade.order.orderId
+                        session.commit()
+                    except Exception as e:
+                        logger.warning("Could not place exit orders for adopted %s: %s", symbol, e)
+
                     result["orphan_count"] += 1
                     result["orphans"].append({
                         "symbol": symbol,
                         "position": pos["position"],
-                        "market_price": pos["market_price"],
+                        "market_price": market_price,
                         "unrealized_pnl": pos["unrealized_pnl"],
+                        "adopted": True,
                     })
-                    logger.warning(
-                        "Reconciliation: %s is in IBKR but not tracked by bot (%s shares)",
-                        symbol, pos["position"],
+                    logger.info(
+                        "Reconciliation: Adopted orphan %s %s | %d shares @ $%.2f | SL=$%.2f TP=$%.2f",
+                        side, symbol, int(quantity), entry_price, stop_loss, take_profit,
                     )
 
             if result["closed_count"] or result["orphan_count"]:

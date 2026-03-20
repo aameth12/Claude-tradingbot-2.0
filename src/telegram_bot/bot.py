@@ -94,7 +94,8 @@ class TradingBot:
                 try:
                     account = await broker.get_account_pnl()
                     msg += (
-                        f"Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
+                        f"Total Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
+                        f"Cash: ${account.get('TotalCashValue', 0):,.2f}\n"
                         f"Unrealized P&L: ${account.get('UnrealizedPnL', 0):+,.2f}\n"
                         f"Realized P&L: ${account.get('RealizedPnL', 0):+,.2f}\n"
                         f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
@@ -375,16 +376,40 @@ class TradingBot:
             total_wins = sum(t.pnl or 0 for t in winners)
             total_losses = abs(sum(t.pnl or 0 for t in losers))
 
+            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
+
             msg = (
                 f"Overall Performance\n"
                 f"{'='*40}\n\n"
-                f"Total Trades: {len(all_closed)}\n"
+                f"Total Closed Trades: {len(all_closed)}\n"
+                f"Open Positions: {len(open_trades)}\n"
                 f"Win Rate: {len(winners)/len(all_closed)*100:.1f}%\n"
-                f"Total P&L: ${total_pnl:+,.2f}\n"
-                f"Profit Factor: {total_wins/total_losses:.2f}\n" if total_losses > 0 else ""
-                f"Avg Win: ${total_wins/len(winners):,.2f}\n" if winners else ""
-                f"Avg Loss: ${total_losses/len(losers):,.2f}\n" if losers else ""
+                f"Total P&L (closed): ${total_pnl:+,.2f}\n"
             )
+            if total_losses > 0:
+                msg += f"Profit Factor: {total_wins/total_losses:.2f}\n"
+            if winners:
+                msg += f"Avg Win: ${total_wins/len(winners):,.2f}\n"
+            if losers:
+                msg += f"Avg Loss: ${total_losses/len(losers):,.2f}\n"
+
+            # Show IBKR account data for comparison
+            broker = self.trading_engine.broker if self.trading_engine else None
+            if broker and broker.connected:
+                try:
+                    account = await broker.get_account_pnl()
+                    msg += (
+                        f"\nIBKR Account\n"
+                        f"{'-'*30}\n"
+                        f"Total Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
+                        f"Cash: ${account.get('TotalCashValue', 0):,.2f}\n"
+                        f"Unrealized P&L: ${account.get('UnrealizedPnL', 0):+,.2f}\n"
+                        f"Realized P&L: ${account.get('RealizedPnL', 0):+,.2f}\n"
+                        f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
+                    )
+                except Exception:
+                    pass
+
             await update.message.reply_text(msg)
         finally:
             session.close()
@@ -742,22 +767,40 @@ class TradingBot:
                 for t in result["closed_trades"]:
                     msg += f"  {t['side']} {t['symbol']}: ${t['pnl'] or 0:+,.2f}\n"
             if result["orphans"]:
-                msg += "\nUntracked IBKR Positions:\n"
+                msg += "\nAdopted IBKR Positions:\n"
                 for o in result["orphans"]:
                     msg += (
                         f"  {o['symbol']}: {o['position']:.0f} shares"
-                        f" | P&L: ${o['unrealized_pnl']:+,.2f}\n"
+                        f" | P&L: ${o['unrealized_pnl']:+,.2f}"
+                        f" (now tracked)\n"
                     )
+
+            # Show final state after sync
+            sync_session = get_session()
+            try:
+                open_count = sync_session.query(Trade).filter(Trade.status == "OPEN").count()
+                closed_count = sync_session.query(Trade).filter(Trade.status == "CLOSED").count()
+                msg += (
+                    f"\nBot DB State:\n"
+                    f"  Open positions: {open_count}\n"
+                    f"  Closed trades: {closed_count}\n"
+                )
+            finally:
+                sync_session.close()
 
             # Append current account state
             try:
                 account = await self.trading_engine.broker.get_account_pnl()
+                portfolio = await self.trading_engine.broker.get_portfolio()
+                ibkr_open = len([p for p in portfolio if p["position"] != 0])
                 msg += (
                     f"\nIBKR Account:\n"
-                    f"  Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
+                    f"  Total Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
+                    f"  Cash: ${account.get('TotalCashValue', 0):,.2f}\n"
                     f"  Unrealized P&L: ${account.get('UnrealizedPnL', 0):+,.2f}\n"
                     f"  Realized P&L: ${account.get('RealizedPnL', 0):+,.2f}\n"
                     f"  Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
+                    f"  IBKR Open Positions: {ibkr_open}\n"
                 )
             except Exception:
                 pass
