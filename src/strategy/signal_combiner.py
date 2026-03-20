@@ -30,14 +30,24 @@ class SignalCombiner:
     def __init__(self):
         self.config = get_config()
         self.confidence_threshold = self.config["ai"]["confidence_threshold"]
-        # Weights for different signal sources
-        # Multi-timeframe is most reliable; AI is least reliable
-        self.weights = {
-            "tradingview_summary": 0.25,
-            "tradingview_indicators": 0.25,
-            "ai_chart": 0.15,
-            "multi_timeframe": 0.35,
-        }
+        # Weights for different signal sources (with sentiment)
+        sentiment_weight = self.config.get("agents", {}).get("news_sentiment", {}).get("sentiment_weight", 0.0)
+        if sentiment_weight > 0:
+            remaining = 1.0 - sentiment_weight
+            self.weights = {
+                "tradingview_summary": round(0.25 * remaining / 0.85, 3),
+                "tradingview_indicators": round(0.25 * remaining / 0.85, 3),
+                "ai_chart": round(0.15 * remaining / 0.85, 3),
+                "multi_timeframe": round(0.35 * remaining / 0.85, 3),
+                "sentiment": sentiment_weight,
+            }
+        else:
+            self.weights = {
+                "tradingview_summary": 0.25,
+                "tradingview_indicators": 0.25,
+                "ai_chart": 0.15,
+                "multi_timeframe": 0.35,
+            }
 
     def evaluate_direction(
         self,
@@ -46,6 +56,8 @@ class SignalCombiner:
         tv_indicator_signals: dict,
         ai_analysis: dict,
         multi_tf_analyses: dict,
+        sentiment_score: float = 0.0,
+        confidence_threshold_override: float | None = None,
     ) -> Optional[dict]:
         """Determine signal direction and confidence from all sources.
 
@@ -90,18 +102,25 @@ class SignalCombiner:
         mtf_score = self._score_multi_timeframe(multi_tf_analyses)
         scores["multi_timeframe"] = mtf_score
 
+        # 5. Sentiment score (if agents enabled)
+        if "sentiment" in self.weights:
+            scores["sentiment"] = max(-1.0, min(1.0, sentiment_score))
+
         # Use adjusted weights if AI analysis is unavailable (error or empty)
         ai_available = ai_analysis and "error" not in ai_analysis and ai_analysis.get("recommendation", "NEUTRAL") != "NEUTRAL"
         if ai_available:
             weights = self.weights
         else:
             # Redistribute AI weight to other sources
-            weights = {
-                "tradingview_summary": 0.30,
-                "tradingview_indicators": 0.30,
-                "ai_chart": 0.0,
-                "multi_timeframe": 0.40,
-            }
+            ai_w = self.weights.get("ai_chart", 0.15)
+            weights = dict(self.weights)
+            weights["ai_chart"] = 0.0
+            # Distribute AI weight proportionally to remaining sources
+            remaining_keys = [k for k in weights if k != "ai_chart" and weights[k] > 0]
+            if remaining_keys:
+                bonus = ai_w / len(remaining_keys)
+                for k in remaining_keys:
+                    weights[k] = round(weights[k] + bonus, 3)
 
         # Weighted combined score
         combined_score = sum(
@@ -133,10 +152,11 @@ class SignalCombiner:
 
         confidence = min(abs(combined_score), 1.0)
 
-        if confidence < self.confidence_threshold:
+        threshold = confidence_threshold_override or self.confidence_threshold
+        if confidence < threshold:
             logger.info(
                 "%s: Confidence %.2f below threshold %.2f",
-                symbol, confidence, self.confidence_threshold,
+                symbol, confidence, threshold,
             )
             return None
 

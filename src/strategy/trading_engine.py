@@ -10,6 +10,8 @@ from src.analysis.tradingview_data import TradingViewAnalyzer
 from src.analysis.chart_analyzer import ChartAnalyzer
 from src.strategy.signal_combiner import SignalCombiner, TradeSignal
 from src.risk.risk_manager import RiskManager
+from src.risk.correlation_filter import CorrelationFilter
+from src.agents.agent_manager import AgentManager
 from src.utils.database import get_session, Trade, DailySummary, init_db
 from src.utils.logger import setup_logger
 from src.utils.config import get_config
@@ -26,6 +28,8 @@ class TradingEngine:
         self.chart_analyzer = ChartAnalyzer()
         self.signal_combiner = SignalCombiner()
         self.risk_manager = RiskManager()
+        self.correlation_filter = CorrelationFilter()
+        self.agent_manager = AgentManager()
         self.config = get_config()
         self.running = False
         self.telegram_bot = None  # Set externally after init
@@ -33,6 +37,7 @@ class TradingEngine:
         # Track highest/lowest prices for trailing stops
         self._price_extremes = {}  # {symbol: highest_or_lowest_price}
         self._cached_portfolio_value = None  # Cached per scan cycle
+        self._current_regime = None  # Cached market regime
 
         init_db()
 
@@ -68,7 +73,19 @@ class TradingEngine:
 
         # Clear caches from previous scan cycle
         self.tv_analyzer.clear_cache()
+        self.correlation_filter.clear_cache()
         self._cached_portfolio_value = None
+
+        # Refresh market regime (cached, only calls API if stale)
+        try:
+            self._current_regime = await self.agent_manager.get_market_regime(watchlist)
+            if self._current_regime:
+                logger.info("Market regime: %s (VIX=%.1f, scale=%.1f)",
+                            self._current_regime.regime,
+                            self._current_regime.vix_level,
+                            self._current_regime.recommended_position_scale)
+        except Exception as e:
+            logger.warning("Failed to get market regime: %s", e)
 
         # Analyze symbols in parallel (with per-symbol timeout)
         async def _analyze_with_timeout(symbol: str):
@@ -110,8 +127,32 @@ class TradingEngine:
             if existing:
                 logger.info("Already in position for %s, skipping", symbol)
                 return None
+            # Get open position symbols for correlation check
+            open_symbols = [
+                t.symbol for t in session.query(Trade).filter(Trade.status == "OPEN").all()
+            ]
         finally:
             session.close()
+
+        # Correlation filter — block highly correlated or sector-concentrated trades
+        can_trade_corr, corr_reason, _ = self.correlation_filter.check(symbol, open_symbols)
+        if not can_trade_corr:
+            logger.info("%s blocked by correlation filter: %s", symbol, corr_reason)
+            return None
+
+        # Earnings/sentiment check — block if earnings too close
+        sentiment_score = 0.0
+        try:
+            sentiment = await self.agent_manager.get_sentiment(symbol)
+            if sentiment:
+                if sentiment.should_block_trade:
+                    logger.info("%s blocked: earnings within %d days (%s)",
+                                symbol, self.config.get("agents", {}).get("news_sentiment", {}).get("earnings_block_days", 2),
+                                sentiment.earnings_date)
+                    return None
+                sentiment_score = sentiment.sentiment_score
+        except Exception as e:
+            logger.warning("Sentiment check failed for %s: %s", symbol, e)
 
         # 1. Get TradingView analysis (primary timeframe)
         tv_analysis = self.tv_analyzer.get_analysis(symbol, "1h")
@@ -149,12 +190,18 @@ class TradingEngine:
                 logger.warning("AI chart analysis skipped for %s: %s", symbol, e)
 
         # 6. Determine signal direction from all sources FIRST
+        regime_confidence = None
+        if self._current_regime:
+            regime_confidence = self._current_regime.recommended_confidence_threshold
+
         direction = self.signal_combiner.evaluate_direction(
             symbol=symbol,
             tv_analysis=tv_analysis,
             tv_indicator_signals=tv_signals,
             ai_analysis=ai_analysis,
             multi_tf_analyses=multi_tf,
+            sentiment_score=sentiment_score,
+            confidence_threshold_override=regime_confidence,
         )
 
         if not direction:
@@ -170,8 +217,20 @@ class TradingEngine:
                 pass
         portfolio_value = self._cached_portfolio_value
 
+        # Use regime-adjusted multipliers and position scaling
+        sl_override = None
+        tp_override = None
+        scale = 1.0
+        if self._current_regime:
+            sl_override = self._current_regime.recommended_sl_multiplier
+            tp_override = self._current_regime.recommended_tp_multiplier
+            scale = self._current_regime.recommended_position_scale
+
         trade_levels = self.risk_manager.get_trade_levels(
-            current_price, atr, direction["side"], portfolio_value
+            current_price, atr, direction["side"], portfolio_value,
+            sl_multiplier_override=sl_override,
+            tp_multiplier_override=tp_override,
+            scale_factor=scale,
         )
 
         # 8. Build final signal with correctly matched trade levels
@@ -389,6 +448,10 @@ class TradingEngine:
                             f"P&L: ${pnl:+,.2f} ({pnl_pct:+.2f}%)"
                         )
                         await self.telegram_bot.send_notification(msg)
+
+                    # Fire trade review agent (async, don't block)
+                    if self.config.get("agents", {}).get("trade_review", {}).get("enabled"):
+                        asyncio.create_task(self.agent_manager.review_trade(trade.id))
 
                     # Clean up tracking
                     self._price_extremes.pop(trade.symbol, None)

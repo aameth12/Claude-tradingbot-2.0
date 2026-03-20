@@ -1,10 +1,22 @@
 """Bot version tracking with changelog."""
 
-VERSION = "1.3.0"
-VERSION_NAME = "Sell Machine"
+VERSION = "2.0.0"
+VERSION_NAME = "Agent Intelligence"
 
 # Changelog - newest first
 CHANGELOG = [
+    {
+        "version": "2.0.0",
+        "name": "Agent Intelligence",
+        "changes": [
+            "AI agents: Market Regime, Sentiment, Trade Review",
+            "Dynamic SL/TP/sizing adapts to TRENDING/RANGING/VOLATILE markets",
+            "Earnings calendar blocks trades before earnings",
+            "Correlation filter prevents concentrated positions",
+            "VIX-based position scaling (smaller in volatile markets)",
+            "/regime /sentiment /review /accuracy Telegram commands",
+        ],
+    },
     {
         "version": "1.3.0",
         "name": "Sell Machine",

@@ -70,6 +70,39 @@ class BacktestResult(Base):
     details = Column(Text, nullable=True)  # JSON with full trade list
 
 
+class AgentOutput(Base):
+    __tablename__ = "agent_outputs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_name = Column(String(50), nullable=False, index=True)
+    symbol = Column(String(10), nullable=True)
+    output_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class TradeReviewRecord(Base):
+    __tablename__ = "trade_reviews"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id = Column(Integer, nullable=False, index=True)
+    correct_indicators = Column(Text, nullable=True)  # JSON list
+    incorrect_indicators = Column(Text, nullable=True)  # JSON list
+    suggested_adjustments = Column(Text, nullable=True)  # JSON dict
+    review_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class IndicatorAccuracy(Base):
+    __tablename__ = "indicator_accuracy"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    indicator_name = Column(String(30), nullable=False, index=True)
+    total_signals = Column(Integer, default=0)
+    correct_signals = Column(Integer, default=0)
+    accuracy_pct = Column(Float, default=0.0)
+    last_updated = Column(DateTime, default=datetime.utcnow)
+
+
 def init_db():
     Base.metadata.create_all(engine)
     # Migrate existing tables: add exit_reason column if missing

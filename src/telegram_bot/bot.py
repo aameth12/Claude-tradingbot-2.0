@@ -57,6 +57,10 @@ class TradingBot:
             "/stopbot - Stop trading\n"
             "/update - Git pull & restart bot\n"
             "/performance - Overall performance stats\n"
+            "/regime - Current market regime & adjustments\n"
+            "/sentiment <SYMBOL> - Sentiment & earnings check\n"
+            "/review [ID] - Trade review (last trade if no ID)\n"
+            "/accuracy - Indicator accuracy stats\n"
             "/version - Version info & changelog\n"
             "/help - Show this help"
         )
@@ -454,6 +458,132 @@ class TradingBot:
 
         await update.message.reply_text(msg)
 
+    async def regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show current market regime."""
+        if not self._is_authorized(update):
+            return
+        if not self.trading_engine or not self.trading_engine.agent_manager:
+            await update.message.reply_text("Agents not initialized.")
+            return
+
+        regime = self.trading_engine._current_regime
+        if not regime:
+            await update.message.reply_text("No regime data yet. Wait for next scan cycle.")
+            return
+
+        msg = (
+            f"Market Regime\n{'='*30}\n"
+            f"Regime: {regime.regime} ({regime.confidence:.0%} confidence)\n"
+            f"VIX: {regime.vix_level:.1f} ({regime.vix_trend})\n"
+            f"Breadth: {regime.breadth_pct:.1f}% above EMA50\n\n"
+            f"Adjustments:\n"
+            f"  SL Multiplier: {regime.recommended_sl_multiplier}x ATR\n"
+            f"  TP Multiplier: {regime.recommended_tp_multiplier}x ATR\n"
+            f"  Confidence Threshold: {regime.recommended_confidence_threshold}\n"
+            f"  Position Scale: {regime.recommended_position_scale:.0%}\n"
+            f"  Updated: {regime.timestamp[:19]}"
+        )
+        await update.message.reply_text(msg)
+
+    async def sentiment_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show sentiment for a symbol."""
+        if not self._is_authorized(update):
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: /sentiment SYMBOL")
+            return
+        if not self.trading_engine or not self.trading_engine.agent_manager:
+            await update.message.reply_text("Agents not initialized.")
+            return
+
+        symbol = context.args[0].upper()
+        await update.message.reply_text(f"Getting sentiment for {symbol}...")
+
+        try:
+            sentiment = await self.trading_engine.agent_manager.get_sentiment(symbol)
+            if not sentiment:
+                await update.message.reply_text("Sentiment agent disabled or failed.")
+                return
+
+            earnings_str = sentiment.earnings_date or "Unknown"
+            block_str = " BLOCKED" if sentiment.should_block_trade else " OK to trade"
+
+            msg = (
+                f"Sentiment: {symbol}\n{'='*30}\n"
+                f"Score: {sentiment.sentiment_score:+.2f} "
+                f"({'bullish' if sentiment.sentiment_score > 0.1 else 'bearish' if sentiment.sentiment_score < -0.1 else 'neutral'})\n"
+                f"Earnings: {earnings_str}{block_str}\n"
+            )
+            if sentiment.news_events:
+                msg += "Events:\n"
+                for event in sentiment.news_events[:5]:
+                    msg += f"  - {event}\n"
+
+            await update.message.reply_text(msg)
+        except Exception as e:
+            await update.message.reply_text(f"Failed: {e}")
+
+    async def review_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show trade review for a specific trade or the last closed trade."""
+        if not self._is_authorized(update):
+            return
+
+        session = get_session()
+        try:
+            if context.args:
+                trade_id = int(context.args[0])
+            else:
+                # Get last closed trade
+                last = session.query(Trade).filter(Trade.status == "CLOSED").order_by(Trade.exit_time.desc()).first()
+                if not last:
+                    await update.message.reply_text("No closed trades to review.")
+                    return
+                trade_id = last.id
+
+            from src.utils.database import TradeReviewRecord
+            review = session.query(TradeReviewRecord).filter(
+                TradeReviewRecord.trade_id == trade_id
+            ).first()
+
+            if not review:
+                await update.message.reply_text(f"No review found for trade #{trade_id}.")
+                return
+
+            import json
+            correct = json.loads(review.correct_indicators or "[]")
+            incorrect = json.loads(review.incorrect_indicators or "[]")
+
+            msg = (
+                f"Trade Review #{trade_id}\n{'='*30}\n"
+                f"Correct: {', '.join(correct) if correct else 'None'}\n"
+                f"Incorrect: {', '.join(incorrect) if incorrect else 'None'}\n\n"
+                f"{review.review_text or ''}"
+            )
+            await update.message.reply_text(msg)
+        except Exception as e:
+            await update.message.reply_text(f"Failed: {e}")
+        finally:
+            session.close()
+
+    async def accuracy_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show indicator accuracy stats."""
+        if not self._is_authorized(update):
+            return
+        if not self.trading_engine or not self.trading_engine.agent_manager:
+            await update.message.reply_text("Agents not initialized.")
+            return
+
+        stats = self.trading_engine.agent_manager.get_accuracy_stats()
+        if not stats:
+            await update.message.reply_text("No accuracy data yet. Trade reviews build this over time.")
+            return
+
+        msg = f"Indicator Accuracy\n{'='*30}\n"
+        for s in stats:
+            msg += f"  {s['name']}: {s['accuracy']:.1f}% ({s['correct']}/{s['total']})\n"
+
+        await update.message.reply_text(msg)
+
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self.start(update, context)
 
@@ -476,6 +606,10 @@ class TradingBot:
         self.app.add_handler(CommandHandler("stopbot", self.stopbot))
         self.app.add_handler(CommandHandler("update", self.update))
         self.app.add_handler(CommandHandler("version", self.version))
+        self.app.add_handler(CommandHandler("regime", self.regime))
+        self.app.add_handler(CommandHandler("sentiment", self.sentiment_cmd))
+        self.app.add_handler(CommandHandler("review", self.review_cmd))
+        self.app.add_handler(CommandHandler("accuracy", self.accuracy_cmd))
         self.app.add_handler(CommandHandler("help", self.help_cmd))
 
         return self.app

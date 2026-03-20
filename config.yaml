@@ -85,6 +85,70 @@ schedule:
   scan_interval_minutes: 2       # scan watchlist every N minutes
   pre_market_scan: "09:15"       # scan before market open
 
+# --- AI Agents ---
+agents:
+  enabled: true
+  market_regime:
+    enabled: true
+    refresh_interval_minutes: 15
+    regimes:
+      trending:
+        sl_multiplier: 2.5
+        tp_multiplier: 5.0
+        confidence_threshold: 0.55
+        position_scale: 1.0
+      ranging:
+        sl_multiplier: 1.5
+        tp_multiplier: 2.5
+        confidence_threshold: 0.70
+        position_scale: 0.7
+      volatile:
+        sl_multiplier: 3.0
+        tp_multiplier: 4.0
+        confidence_threshold: 0.75
+        position_scale: 0.5
+  news_sentiment:
+    enabled: true
+    earnings_block_days: 2
+    sentiment_refresh_minutes: 30
+    sentiment_weight: 0.10
+  trade_review:
+    enabled: true
+    auto_apply_suggestions: false
+
+# --- Correlation Filter ---
+correlation:
+  enabled: true
+  max_correlation: 0.75
+  max_sector_positions: 3
+  sectors:
+    tech:
+      - AAPL
+      - MSFT
+      - GOOGL
+      - NVDA
+      - META
+      - AMD
+    index_etf:
+      - SPY
+      - QQQ
+    mega_cap:
+      - AMZN
+      - TSLA
+
+# --- VIX-based Position Sizing ---
+vix_scaling:
+  enabled: true
+  thresholds:
+    - vix_above: 30
+      scale: 0.3
+    - vix_above: 25
+      scale: 0.5
+    - vix_above: 20
+      scale: 0.75
+    - vix_above: 0
+      scale: 1.0
+
 # --- Broker (IB Gateway) ---
 broker:
   host: "127.0.0.1"

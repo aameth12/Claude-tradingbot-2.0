@@ -142,6 +142,31 @@ async def run_bot():
         name="Daily Summary",
     )
 
+    # Refresh market regime every 15 minutes during market hours
+    scheduler.add_job(
+        lambda: asyncio.ensure_future(engine.agent_manager.get_market_regime(config["watchlist"])),
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour="9-16",
+            minute="*/15",
+            timezone=config["schedule"]["timezone"],
+        ),
+        id="refresh_regime",
+        name="Refresh Market Regime",
+    )
+
+    # Refresh earnings calendar daily at 9:00 AM
+    scheduler.add_job(
+        lambda: asyncio.ensure_future(engine.agent_manager.refresh_earnings_calendar(config["watchlist"])),
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=9, minute=0,
+            timezone=config["schedule"]["timezone"],
+        ),
+        id="refresh_earnings",
+        name="Refresh Earnings Calendar",
+    )
+
     scheduler.start()
     logger.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
 
@@ -169,6 +194,8 @@ async def run_bot():
             f"Watchlist: {', '.join(config['watchlist'])}\n"
             f"Max Positions: {config['trading']['max_open_positions']}\n"
             f"Scan Interval: {scan_interval}min\n"
+            f"Agents: {'ON' if config.get('agents', {}).get('enabled') else 'OFF'}\n"
+            f"Correlation Filter: {'ON' if config.get('correlation', {}).get('enabled') else 'OFF'}\n"
             f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             f"What's New:\n{get_latest_changelog()}"
         )

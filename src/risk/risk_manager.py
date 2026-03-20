@@ -14,21 +14,25 @@ class RiskManager:
         self.config = get_config()["risk"]
         self.trading_config = get_config()["trading"]
 
-    def calculate_stop_loss(self, entry_price: float, atr: float, side: str) -> float:
+    def calculate_stop_loss(self, entry_price: float, atr: float, side: str,
+                            multiplier_override: float | None = None) -> float:
         """Calculate stop loss based on ATR."""
-        multiplier = self.config["stop_loss"]["atr_multiplier"]
+        multiplier = multiplier_override or self.config["stop_loss"]["atr_multiplier"]
         if side == "LONG":
             return round(entry_price - (atr * multiplier), 2)
         else:  # SHORT
             return round(entry_price + (atr * multiplier), 2)
 
-    def calculate_take_profit(self, entry_price: float, atr: float, side: str) -> float:
+    def calculate_take_profit(self, entry_price: float, atr: float, side: str,
+                              multiplier_override: float | None = None,
+                              sl_multiplier_override: float | None = None) -> float:
         """Calculate take profit based on ATR, ensuring minimum RR ratio."""
-        multiplier = self.config["take_profit"]["atr_multiplier"]
+        multiplier = multiplier_override or self.config["take_profit"]["atr_multiplier"]
         min_rr = self.config["risk_reward_ratio"]
 
         # Ensure TP distance >= RR * SL distance
-        sl_distance = atr * self.config["stop_loss"]["atr_multiplier"]
+        sl_mult = sl_multiplier_override or self.config["stop_loss"]["atr_multiplier"]
+        sl_distance = atr * sl_mult
         tp_distance = max(atr * multiplier, sl_distance * min_rr)
 
         if side == "LONG":
@@ -37,7 +41,8 @@ class RiskManager:
             return round(entry_price - tp_distance, 2)
 
     def calculate_position_size(
-        self, entry_price: float, stop_loss: float, portfolio_value: float
+        self, entry_price: float, stop_loss: float, portfolio_value: float,
+        scale_factor: float = 1.0,
     ) -> int:
         """Calculate position size based on max risk per trade."""
         risk_per_share = abs(entry_price - stop_loss)
@@ -51,6 +56,7 @@ class RiskManager:
         max_shares_by_size = int(self.trading_config["max_position_size"] / entry_price)
 
         quantity = min(max_shares_by_risk, max_shares_by_size)
+        quantity = int(quantity * scale_factor)
         return max(quantity, 0)
 
     def validate_risk_reward(self, entry: float, stop_loss: float, take_profit: float, side: str) -> bool:
@@ -191,11 +197,14 @@ class RiskManager:
         finally:
             session.close()
 
-    def get_trade_levels(self, entry_price: float, atr: float, side: str, portfolio_value: float) -> dict:
+    def get_trade_levels(self, entry_price: float, atr: float, side: str, portfolio_value: float,
+                         sl_multiplier_override: float | None = None,
+                         tp_multiplier_override: float | None = None,
+                         scale_factor: float = 1.0) -> dict:
         """Get all trade levels: SL, TP, position size, validated."""
-        stop_loss = self.calculate_stop_loss(entry_price, atr, side)
-        take_profit = self.calculate_take_profit(entry_price, atr, side)
-        quantity = self.calculate_position_size(entry_price, stop_loss, portfolio_value)
+        stop_loss = self.calculate_stop_loss(entry_price, atr, side, sl_multiplier_override)
+        take_profit = self.calculate_take_profit(entry_price, atr, side, tp_multiplier_override, sl_multiplier_override)
+        quantity = self.calculate_position_size(entry_price, stop_loss, portfolio_value, scale_factor)
         valid_rr = self.validate_risk_reward(entry_price, stop_loss, take_profit, side)
 
         risk = abs(entry_price - stop_loss)
