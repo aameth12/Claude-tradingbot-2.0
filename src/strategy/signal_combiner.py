@@ -142,13 +142,15 @@ class SignalCombiner:
             logger.info("%s: %s not in allowed sides", symbol, side)
             return None
 
-        # AI veto — hard block if AI explicitly says no opportunity
-        if side == "LONG" and ai_analysis.get("long_opportunity") is False:
-            logger.info("%s: AI vetoed LONG opportunity, blocking trade", symbol)
-            return None
-        elif side == "SHORT" and ai_analysis.get("short_opportunity") is False:
-            logger.info("%s: AI vetoed SHORT opportunity, blocking trade", symbol)
-            return None
+        # AI veto — soft penalty instead of hard block
+        # Only apply penalty when AI has a confident opposing opinion (not just neutral/uncertain)
+        ai_confidence = ai_analysis.get("confidence", 0.0)
+        if side == "LONG" and ai_analysis.get("long_opportunity") is False and ai_confidence > 0.3:
+            combined_score *= 0.6  # reduce by 40% instead of blocking
+            logger.info("%s: AI discourages LONG (confidence %.2f), reducing score", symbol, ai_confidence)
+        elif side == "SHORT" and ai_analysis.get("short_opportunity") is False and ai_confidence > 0.3:
+            combined_score *= 0.6  # reduce by 40% instead of blocking
+            logger.info("%s: AI discourages SHORT (confidence %.2f), reducing score", symbol, ai_confidence)
 
         confidence = min(abs(combined_score), 1.0)
 

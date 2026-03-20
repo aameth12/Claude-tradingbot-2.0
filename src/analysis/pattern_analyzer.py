@@ -351,8 +351,8 @@ def _neutral(reason: str = "") -> dict:
         "patterns_detected": [],
         "support_levels": [],
         "resistance_levels": [],
-        "long_opportunity": False,
-        "long_reasoning": "",
-        "short_opportunity": False,
-        "short_reasoning": "",
+        "long_opportunity": True,
+        "long_reasoning": "No pattern data — deferring to other signals",
+        "short_opportunity": True,
+        "short_reasoning": "No pattern data — deferring to other signals",
     }
