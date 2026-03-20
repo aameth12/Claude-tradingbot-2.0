@@ -291,6 +291,16 @@ class TradingViewAnalyzer:
         self._df_cache[cache_key] = df
         return df
 
+    def get_current_price(self, symbol: str) -> float | None:
+        """Get the current price for a symbol via yfinance (no IBKR needed)."""
+        try:
+            df = self._get_df(symbol, "1h")
+            if not df.empty:
+                return float(df.iloc[-1]["close"])
+        except Exception as e:
+            logger.warning("Failed to get price for %s via yfinance: %s", symbol, e)
+        return None
+
     def clear_cache(self):
         """Clear the DataFrame cache between scan cycles."""
         self._df_cache.clear()

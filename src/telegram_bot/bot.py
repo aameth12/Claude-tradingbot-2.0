@@ -94,12 +94,17 @@ class TradingBot:
                 msg += f"\nOpen Positions:\n"
                 total_unrealized = 0
                 for t in open_trades:
-                    # Fetch current price from broker
+                    # Fetch current price from broker, fallback to yfinance
                     current_price = None
                     if self.trading_engine and self.trading_engine.broker:
                         try:
                             market_data = await self.trading_engine.broker.get_market_data(t.symbol)
                             current_price = market_data.get("last") or market_data.get("close")
+                        except Exception:
+                            pass
+                    if not current_price and self.trading_engine:
+                        try:
+                            current_price = self.trading_engine.tv_analyzer.get_current_price(t.symbol)
                         except Exception:
                             pass
 

@@ -358,8 +358,14 @@ class TradingEngine:
 
             for trade in open_trades:
                 try:
-                    market_data = await self.broker.get_market_data(trade.symbol)
-                    current_price = market_data.get("last", 0)
+                    current_price = None
+                    try:
+                        market_data = await self.broker.get_market_data(trade.symbol)
+                        current_price = market_data.get("last") or market_data.get("close")
+                    except Exception:
+                        pass
+                    if not current_price:
+                        current_price = self.tv_analyzer.get_current_price(trade.symbol)
                     if not current_price:
                         continue
 
@@ -412,78 +418,131 @@ class TradingEngine:
             session.close()
 
     async def check_closed_positions(self):
-        """Check broker for filled orders and update trade records.
+        """Check for closed positions and update trade records.
 
-        Uses actual broker fill prices instead of stale market data for
-        accurate P&L calculation. Tracks exit reason (SL/TP/trailing).
+        In live mode: checks broker for filled orders using actual fill prices.
+        In paper mode: simulates SL/TP hits by checking current price against levels.
         """
         session = get_session()
         try:
             open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
-            broker_positions = await self.broker.get_positions()
-            position_symbols = {p["symbol"] for p in broker_positions}
+            is_paper = self.config["trading"]["mode"] == "paper"
 
-            for trade in open_trades:
-                if trade.symbol not in position_symbols:
-                    # Position was closed — get actual fill price from broker
-                    exit_price = None
-                    try:
-                        fills = await self.broker.get_recent_fills(trade.symbol)
-                        # Find the exit fill (opposite side of entry)
-                        exit_side = "SLD" if trade.side == "LONG" else "BOT"
-                        exit_fills = [f for f in fills if f["side"] == exit_side]
-                        if exit_fills:
-                            exit_price = exit_fills[-1]["price"]
-                    except Exception as e:
-                        logger.warning("Could not get fills for %s: %s", trade.symbol, e)
-
-                    # Fallback to market data if fills unavailable
-                    if not exit_price:
-                        market_data = await self.broker.get_market_data(trade.symbol)
-                        exit_price = market_data.get("last") or trade.entry_price
-
-                    if trade.side == "LONG":
-                        pnl = (exit_price - trade.entry_price) * trade.quantity
-                    else:
-                        pnl = (trade.entry_price - exit_price) * trade.quantity
-
-                    pnl_pct = (pnl / (trade.entry_price * trade.quantity)) * 100
-
-                    # Determine exit reason from price proximity to SL/TP
-                    exit_reason = self._infer_exit_reason(trade, exit_price)
-
-                    trade.exit_price = exit_price
-                    trade.exit_time = datetime.utcnow()
-                    trade.pnl = round(pnl, 2)
-                    trade.pnl_pct = round(pnl_pct, 2)
-                    trade.status = "CLOSED"
-                    trade.exit_reason = exit_reason
-                    session.commit()
-
-                    logger.info(
-                        "Trade closed: %s %s | PnL: $%.2f (%.2f%%) | reason: %s",
-                        trade.side, trade.symbol, pnl, pnl_pct, exit_reason,
-                    )
-
-                    # Notify via Telegram
-                    if self.telegram_bot:
-                        msg = (
-                            f"TRADE CLOSED ({exit_reason})\n"
-                            f"{trade.side} {trade.symbol}\n"
-                            f"Entry: ${trade.entry_price:.2f} -> Exit: ${exit_price:.2f}\n"
-                            f"P&L: ${pnl:+,.2f} ({pnl_pct:+.2f}%)"
-                        )
-                        await self.telegram_bot.send_notification(msg)
-
-                    # Fire trade review agent (async, don't block)
-                    if self.config.get("agents", {}).get("trade_review", {}).get("enabled"):
-                        asyncio.create_task(self.agent_manager.review_trade(trade.id))
-
-                    # Clean up tracking
-                    self._price_extremes.pop(trade.symbol, None)
-
+            if is_paper:
+                await self._check_paper_exits(open_trades, session)
+            else:
+                await self._check_live_exits(open_trades, session)
         finally:
             session.close()
+
+    async def _check_paper_exits(self, open_trades, session):
+        """Paper mode: simulate SL/TP exits by checking price vs levels."""
+        for trade in open_trades:
+            try:
+                # Get current price (broker first, yfinance fallback)
+                current_price = None
+                try:
+                    market_data = await self.broker.get_market_data(trade.symbol)
+                    current_price = market_data.get("last") or market_data.get("close")
+                except Exception:
+                    pass
+                if not current_price:
+                    current_price = self.tv_analyzer.get_current_price(trade.symbol)
+                if not current_price:
+                    continue
+
+                # Check if SL or TP was hit
+                exit_price = None
+                exit_reason = None
+
+                if trade.side == "LONG":
+                    if current_price <= trade.stop_loss:
+                        exit_price = trade.stop_loss
+                        exit_reason = "STOP_LOSS"
+                    elif current_price >= trade.take_profit:
+                        exit_price = trade.take_profit
+                        exit_reason = "TAKE_PROFIT"
+                else:  # SHORT
+                    if current_price >= trade.stop_loss:
+                        exit_price = trade.stop_loss
+                        exit_reason = "STOP_LOSS"
+                    elif current_price <= trade.take_profit:
+                        exit_price = trade.take_profit
+                        exit_reason = "TAKE_PROFIT"
+
+                if exit_price:
+                    await self._close_trade(trade, exit_price, exit_reason, session)
+
+            except Exception as e:
+                logger.error("Error checking paper exit for %s: %s", trade.symbol, e)
+
+    async def _check_live_exits(self, open_trades, session):
+        """Live mode: check broker for filled orders."""
+        try:
+            broker_positions = await self.broker.get_positions()
+        except Exception as e:
+            logger.error("Failed to get broker positions: %s", e)
+            return
+        position_symbols = {p["symbol"] for p in broker_positions}
+
+        for trade in open_trades:
+            if trade.symbol not in position_symbols:
+                # Position was closed — get actual fill price from broker
+                exit_price = None
+                try:
+                    fills = await self.broker.get_recent_fills(trade.symbol)
+                    exit_side = "SLD" if trade.side == "LONG" else "BOT"
+                    exit_fills = [f for f in fills if f["side"] == exit_side]
+                    if exit_fills:
+                        exit_price = exit_fills[-1]["price"]
+                except Exception as e:
+                    logger.warning("Could not get fills for %s: %s", trade.symbol, e)
+
+                if not exit_price:
+                    try:
+                        market_data = await self.broker.get_market_data(trade.symbol)
+                        exit_price = market_data.get("last") or trade.entry_price
+                    except Exception:
+                        exit_price = trade.entry_price
+
+                exit_reason = self._infer_exit_reason(trade, exit_price)
+                await self._close_trade(trade, exit_price, exit_reason, session)
+
+    async def _close_trade(self, trade, exit_price, exit_reason, session):
+        """Close a trade with the given exit price and reason."""
+        if trade.side == "LONG":
+            pnl = (exit_price - trade.entry_price) * trade.quantity
+        else:
+            pnl = (trade.entry_price - exit_price) * trade.quantity
+
+        pnl_pct = (pnl / (trade.entry_price * trade.quantity)) * 100
+
+        trade.exit_price = exit_price
+        trade.exit_time = datetime.utcnow()
+        trade.pnl = round(pnl, 2)
+        trade.pnl_pct = round(pnl_pct, 2)
+        trade.status = "CLOSED"
+        trade.exit_reason = exit_reason
+        session.commit()
+
+        logger.info(
+            "Trade closed: %s %s | PnL: $%.2f (%.2f%%) | reason: %s",
+            trade.side, trade.symbol, pnl, pnl_pct, exit_reason,
+        )
+
+        if self.telegram_bot:
+            msg = (
+                f"TRADE CLOSED ({exit_reason})\n"
+                f"{trade.side} {trade.symbol}\n"
+                f"Entry: ${trade.entry_price:.2f} -> Exit: ${exit_price:.2f}\n"
+                f"P&L: ${pnl:+,.2f} ({pnl_pct:+.2f}%)"
+            )
+            await self.telegram_bot.send_notification(msg)
+
+        if self.config.get("agents", {}).get("trade_review", {}).get("enabled"):
+            asyncio.create_task(self.agent_manager.review_trade(trade.id))
+
+        self._price_extremes.pop(trade.symbol, None)
 
     @staticmethod
     def _infer_exit_reason(trade: Trade, exit_price: float) -> str:
