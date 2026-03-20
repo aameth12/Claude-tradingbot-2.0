@@ -317,6 +317,8 @@ class TradingBot:
             await update.message.reply_text("Trading engine not initialized.")
             return
 
+        broker = self.trading_engine.broker
+
         session = get_session()
         try:
             open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
@@ -324,22 +326,53 @@ class TradingBot:
                 await update.message.reply_text("No open positions to close.")
                 return
 
-            await update.message.reply_text(f"Closing {len(open_trades)} open position(s)...")
+            await update.message.reply_text(f"Closing {len(open_trades)} position(s)...\nStep 1: Cancelling all open orders...")
 
+            # Step 1: Cancel ALL open orders first to free up order slots
+            # This prevents Error 201 (too many orders) and Error 10148 (already cancelled)
+            try:
+                ib_trades = broker.ib.openTrades()
+                cancelled_count = 0
+                for t in ib_trades:
+                    if t.orderStatus.status not in ("Cancelled", "Filled", "Inactive"):
+                        broker.ib.cancelOrder(t.order)
+                        cancelled_count += 1
+                if cancelled_count:
+                    await asyncio.sleep(1)  # Let cancellations propagate
+                    await update.message.reply_text(f"Cancelled {cancelled_count} pending orders.")
+            except Exception as e:
+                logger.warning("Error cancelling open orders: %s", e)
+
+            await update.message.reply_text("Step 2: Closing positions at market...")
+
+            # Step 2: Close each position with a market order
             closed = 0
             for trade in open_trades:
                 try:
-                    # Place market order to close
                     action = "SELL" if trade.side == "LONG" else "BUY"
-                    entry_trade, fill_price = await self.trading_engine.broker.place_entry_order(
-                        symbol=trade.symbol,
-                        action=action,
-                        quantity=trade.quantity,
-                    )
+                    contract = await broker._get_qualified_contract(trade.symbol)
 
-                    # Cancel any open SL/TP orders for this trade
-                    if trade.order_id:
-                        await self.trading_engine.broker.cancel_order(trade.order_id)
+                    # Use MarketOrder directly instead of place_entry_order
+                    # to avoid issues with order presets overriding TIF
+                    from ib_insync import MarketOrder as MktOrder
+                    order = MktOrder(action, trade.quantity)
+                    order.tif = "GTC"  # Avoid Error 10349 (DAY preset rejection)
+                    ib_trade = broker.ib.placeOrder(contract, order)
+
+                    # Wait for fill (up to 15s)
+                    fill_price = None
+                    for _ in range(30):
+                        await asyncio.sleep(0.5)
+                        if ib_trade.orderStatus.status == "Filled":
+                            fill_price = ib_trade.orderStatus.avgFillPrice
+                            break
+
+                    if not fill_price:
+                        # Try to get last price as fallback
+                        broker.ib.cancelOrder(ib_trade.order)
+                        market_data = await broker.get_market_data(trade.symbol)
+                        fill_price = market_data.get("last") or trade.entry_price
+                        logger.warning("Sell order not filled for %s, using market price %.2f", trade.symbol, fill_price)
 
                     # Calculate P&L
                     if trade.side == "LONG":
@@ -357,6 +390,10 @@ class TradingBot:
                     trade.exit_reason = "MANUAL"
                     session.commit()
                     closed += 1
+
+                    await update.message.reply_text(
+                        f"Closed {trade.side} {trade.symbol} @ ${fill_price:.2f} | P&L: ${pnl:+,.2f}"
+                    )
 
                 except Exception as e:
                     logger.error("Failed to close %s %s: %s", trade.side, trade.symbol, e)
