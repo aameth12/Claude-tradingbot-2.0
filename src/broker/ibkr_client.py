@@ -40,6 +40,8 @@ class IBKRClient:
             # Request delayed data as fallback when live data subscription
             # is not available (avoids Error 10089)
             self.ib.reqMarketDataType(3)  # 3 = delayed
+            # Subscribe to account updates so accountValues() is populated
+            self.ib.reqAccountUpdates()
             logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
         except Exception as e:
             logger.error("Failed to connect to IB Gateway: %s", e)
@@ -394,20 +396,37 @@ class IBKRClient:
         return result
 
     async def get_account_pnl(self) -> dict:
-        """Get account-level balance and P&L from IBKR."""
+        """Get account-level balance and P&L from IBKR.
+
+        Tries accountSummary() first, falls back to accountValues()
+        which is auto-populated by reqAccountUpdates().
+        """
         self._ensure_connected()
-        summary = self.ib.accountSummary()
         tags_of_interest = {
             "NetLiquidation", "TotalCashValue", "UnrealizedPnL",
             "RealizedPnL", "BuyingPower", "GrossPositionValue",
         }
         result = {}
+
+        # Try accountSummary first
+        summary = self.ib.accountSummary()
         for item in summary:
             if item.tag in tags_of_interest:
                 try:
                     result[item.tag] = float(item.value)
                 except (ValueError, TypeError):
                     result[item.tag] = 0.0
+
+        # Fall back to accountValues (populated by reqAccountUpdates)
+        if not result or result.get("NetLiquidation", 0) == 0:
+            values = self.ib.accountValues()
+            for item in values:
+                if item.tag in tags_of_interest and item.currency in ("USD", ""):
+                    try:
+                        result[item.tag] = float(item.value)
+                    except (ValueError, TypeError):
+                        result[item.tag] = 0.0
+
         return result
 
     async def get_executions(self, symbol: str = "") -> list[dict]:
