@@ -11,16 +11,17 @@ logger = setup_logger("agents")
 
 
 class BaseAgent(ABC):
-    """Base class for all AI agents with TTL caching and Claude API access."""
+    """Base class for all AI agents with TTL caching and lazy Claude API access.
+
+    The Anthropic client is only created on first _call_claude() invocation,
+    so agents that don't need Claude (regime, sentiment) never instantiate it.
+    """
 
     def __init__(self, name: str, default_ttl: int = 900):
         self.name = name
         self.default_ttl = default_ttl
         self.config = get_config()
-        self.client = anthropic.Anthropic(
-            api_key=ANTHROPIC_API_KEY,
-            timeout=30.0,
-        )
+        self._client = None  # Lazy — created on first _call_claude()
         self._cache: dict[str, dict] = {}  # {key: {"value": ..., "expires": timestamp}}
 
     def get_cached(self, key: str = "default"):
@@ -41,10 +42,16 @@ class BaseAgent(ABC):
         self._cache.clear()
 
     def _call_claude(self, system_prompt: str, user_prompt: str, max_tokens: int = 1000) -> dict:
-        """Call Claude API and parse JSON response."""
+        """Call Claude API and parse JSON response. Creates client lazily."""
+        if self._client is None:
+            self._client = anthropic.Anthropic(
+                api_key=ANTHROPIC_API_KEY,
+                timeout=30.0,
+            )
+
         try:
             model = self.config.get("ai", {}).get("model", "claude-sonnet-4-20250514")
-            response = self.client.messages.create(
+            response = self._client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
                 system=system_prompt,

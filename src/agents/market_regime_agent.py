@@ -1,9 +1,8 @@
 import asyncio
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 
 import yfinance as yf
-import pandas as pd
 
 from src.agents.base_agent import BaseAgent
 from src.utils.logger import setup_logger
@@ -25,33 +24,12 @@ class MarketRegime:
     timestamp: str
 
 
-REGIME_SYSTEM_PROMPT = """You are a market regime classifier. Based on the provided market data, classify the current regime as one of: TRENDING, RANGING, or VOLATILE.
-
-Rules:
-- TRENDING: VIX < 20, breadth > 60% or < 40%, clear directional bias in SPY/QQQ
-- RANGING: VIX 15-22, breadth 40-60%, SPY and QQQ moving sideways
-- VOLATILE: VIX > 25, rapid breadth changes, or significant SPY/QQQ divergence
-
-Respond ONLY with valid JSON, no other text."""
-
-REGIME_USER_PROMPT = """Current Market Data:
-- VIX: {vix_level:.2f} (5-day change: {vix_change:+.2f})
-- VIX Trend: {vix_trend}
-- Market Breadth: {breadth_pct:.1f}% of watchlist above EMA50
-- SPY 5-day return: {spy_return:+.2f}%
-- QQQ 5-day return: {qqq_return:+.2f}%
-- SPY realized volatility (14-day ATR/price): {spy_rv:.2f}%
-
-Classify the regime and recommend parameter adjustments:
-{{
-    "regime": "TRENDING" | "RANGING" | "VOLATILE",
-    "confidence": 0.0 to 1.0,
-    "reasoning": "brief explanation"
-}}"""
-
-
 class MarketRegimeAgent(BaseAgent):
-    """Classifies current market conditions and recommends parameter adjustments."""
+    """Classifies current market conditions using deterministic rules.
+
+    No Claude API calls — regime is classified from VIX, breadth, and
+    volatility data using straightforward threshold logic.
+    """
 
     def __init__(self):
         super().__init__(name="market_regime", default_ttl=900)
@@ -68,22 +46,15 @@ class MarketRegimeAgent(BaseAgent):
         loop = asyncio.get_event_loop()
         data = await loop.run_in_executor(None, self._gather_market_data, watchlist or [])
 
-        # Call Claude for classification
-        result = self._call_claude(
-            REGIME_SYSTEM_PROMPT,
-            REGIME_USER_PROMPT.format(**data),
-        )
+        # Deterministic classification — no Claude API call needed
+        result = self._classify_regime(data)
 
-        regime_name = result.get("regime", "RANGING").upper()
-        if regime_name not in ("TRENDING", "RANGING", "VOLATILE"):
-            regime_name = "RANGING"
-
-        # Look up parameter adjustments from config
+        regime_name = result["regime"]
         params = self.regimes.get(regime_name.lower(), {})
 
         regime = MarketRegime(
             regime=regime_name,
-            confidence=result.get("confidence", 0.5),
+            confidence=result["confidence"],
             vix_level=data["vix_level"],
             vix_trend=data["vix_trend"],
             breadth_pct=data["breadth_pct"],
@@ -96,10 +67,33 @@ class MarketRegimeAgent(BaseAgent):
 
         self.set_cached(regime)
         logger.info(
-            "Market regime: %s (confidence=%.2f, VIX=%.1f)",
-            regime.regime, regime.confidence, regime.vix_level,
+            "Market regime: %s (confidence=%.2f, VIX=%.1f, breadth=%.1f%%)",
+            regime.regime, regime.confidence, regime.vix_level, regime.breadth_pct,
         )
         return regime
+
+    @staticmethod
+    def _classify_regime(data: dict) -> dict:
+        """Classify market regime from data using deterministic rules."""
+        vix = data["vix_level"]
+        breadth = data["breadth_pct"]
+        spy_rv = data["spy_rv"]
+        spy_return = abs(data["spy_return"])
+
+        # VOLATILE: high VIX or high realized volatility
+        if vix > 25 or spy_rv > 2.0:
+            confidence = min(1.0, (vix - 20) / 15 + spy_rv / 3.0) if vix > 20 else spy_rv / 3.0
+            return {"regime": "VOLATILE", "confidence": round(min(1.0, max(0.5, confidence)), 2)}
+
+        # TRENDING: low VIX + skewed breadth + directional move
+        if vix < 20 and (breadth > 60 or breadth < 40):
+            strength = abs(breadth - 50) / 50  # How far from neutral
+            confidence = 0.5 + strength * 0.4 + (spy_return / 10) * 0.1
+            return {"regime": "TRENDING", "confidence": round(min(1.0, confidence), 2)}
+
+        # RANGING: everything else (moderate VIX, neutral breadth)
+        confidence = 0.5 + (1.0 - abs(breadth - 50) / 50) * 0.3
+        return {"regime": "RANGING", "confidence": round(min(1.0, confidence), 2)}
 
     def _gather_market_data(self, watchlist: list[str]) -> dict:
         """Fetch VIX, breadth, and relative performance data."""

@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import time
 from pathlib import Path
 
 import matplotlib
@@ -63,6 +64,8 @@ class ChartAnalyzer:
         self.config = get_config()["ai"]
         self.charts_dir = DATA_DIR / "charts"
         self.charts_dir.mkdir(exist_ok=True)
+        self._analysis_cache: dict[str, dict] = {}  # {key: {"result": dict, "expires": float}}
+        self._cache_ttl = self.config.get("chart_cache_minutes", 15) * 60
 
     def generate_chart_image(
         self,
@@ -119,9 +122,16 @@ class ChartAnalyzer:
         return chart_path
 
     def analyze_chart(self, chart_path: Path, symbol: str, timeframe: str) -> dict:
-        """Send chart image to Claude Vision for analysis."""
+        """Send chart image to Claude Vision for analysis. Results cached per symbol+timeframe."""
         if not self.config.get("chart_analysis_enabled", True):
             return {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": "Chart analysis disabled"}
+
+        # Check cache first
+        cache_key = f"{symbol}_{timeframe}"
+        cached = self._analysis_cache.get(cache_key)
+        if cached and time.time() < cached["expires"]:
+            logger.info("Chart analysis for %s (cached): %s", symbol, cached["result"].get("recommendation"))
+            return cached["result"]
 
         with open(chart_path, "rb") as f:
             image_data = base64.b64encode(f.read()).decode("utf-8")
@@ -160,6 +170,13 @@ class ChartAnalyzer:
                 "Chart analysis for %s: %s (confidence: %.2f)",
                 symbol, analysis.get("recommendation"), analysis.get("confidence", 0),
             )
+
+            # Cache the result
+            self._analysis_cache[cache_key] = {
+                "result": analysis,
+                "expires": time.time() + self._cache_ttl,
+            }
+
             return analysis
 
         except json.JSONDecodeError as e:

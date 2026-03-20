@@ -21,24 +21,12 @@ class SentimentResult:
     timestamp: str
 
 
-SENTIMENT_SYSTEM_PROMPT = """You are a financial sentiment analyst. Given a stock symbol and current date, provide a brief sentiment assessment based on general market conditions and the stock's recent context.
-
-Respond ONLY with valid JSON, no other text."""
-
-SENTIMENT_USER_PROMPT = """Stock: {symbol}
-Current Date: {current_date}
-Earnings Date: {earnings_info}
-
-Provide sentiment analysis:
-{{
-    "sentiment_score": -1.0 to 1.0 (negative=bearish, positive=bullish),
-    "news_events": ["event1", "event2"],
-    "reasoning": "brief explanation"
-}}"""
-
-
 class NewsSentimentAgent(BaseAgent):
-    """Checks earnings calendar and provides sentiment scores."""
+    """Checks earnings calendar and derives sentiment from price momentum.
+
+    No Claude API calls — earnings dates come from yfinance, and sentiment
+    is derived from 5-day price returns (a data-grounded signal).
+    """
 
     def __init__(self):
         super().__init__(name="news_sentiment", default_ttl=1800)  # 30 min default
@@ -67,25 +55,15 @@ class NewsSentimentAgent(BaseAgent):
 
         should_block = earnings_within_n
 
-        # Get sentiment from Claude
-        earnings_info = f"{earnings_date} ({(datetime.strptime(earnings_date, '%Y-%m-%d').date() - date.today()).days} days away)" if earnings_date else "Unknown"
-
-        result = self._call_claude(
-            SENTIMENT_SYSTEM_PROMPT,
-            SENTIMENT_USER_PROMPT.format(
-                symbol=symbol,
-                current_date=date.today().isoformat(),
-                earnings_info=earnings_info,
-            ),
-            max_tokens=500,
-        )
+        # Derive sentiment from 5-day price momentum (no Claude API call)
+        sentiment_score = await self._get_momentum_sentiment(symbol)
 
         sentiment = SentimentResult(
             symbol=symbol,
             earnings_date=earnings_date,
             earnings_within_n_days=earnings_within_n,
-            sentiment_score=max(-1.0, min(1.0, result.get("sentiment_score", 0.0))),
-            news_events=result.get("news_events", []),
+            sentiment_score=sentiment_score,
+            news_events=[],
             should_block_trade=should_block,
             timestamp=datetime.utcnow().isoformat(),
         )
@@ -94,10 +72,31 @@ class NewsSentimentAgent(BaseAgent):
         self.set_cached(sentiment, cache_key, ttl)
 
         logger.info(
-            "%s sentiment: %.2f | earnings: %s | block: %s",
+            "%s sentiment: %.2f (momentum) | earnings: %s | block: %s",
             symbol, sentiment.sentiment_score, earnings_date, should_block,
         )
         return sentiment
+
+    async def _get_momentum_sentiment(self, symbol: str) -> float:
+        """Derive sentiment score from 5-day price return. No API call needed."""
+        try:
+            loop = asyncio.get_event_loop()
+            score = await loop.run_in_executor(None, self._fetch_momentum, symbol)
+            return score
+        except Exception as e:
+            logger.debug("Could not compute momentum for %s: %s", symbol, e)
+            return 0.0
+
+    @staticmethod
+    def _fetch_momentum(symbol: str) -> float:
+        """Fetch 5-day return and convert to sentiment score in [-1, 1]."""
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="5d")
+        if hist.empty or len(hist) < 2:
+            return 0.0
+        five_day_return_pct = (hist["Close"].iloc[-1] / hist["Close"].iloc[0] - 1) * 100
+        # Clamp: ±5% return maps to ±1.0 sentiment
+        return max(-1.0, min(1.0, five_day_return_pct / 5.0))
 
     async def refresh_earnings_calendar(self, watchlist: list[str]):
         """Refresh earnings dates for all watchlist symbols (daily)."""
@@ -136,7 +135,7 @@ class NewsSentimentAgent(BaseAgent):
                         if isinstance(ed, list) and ed:
                             return str(ed[0].date()) if hasattr(ed[0], 'date') else str(ed[0])
                         return str(ed)
-                elif isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
+                elif hasattr(cal, 'loc') and "Earnings Date" in getattr(cal, 'index', []):
                     val = cal.loc["Earnings Date"].iloc[0]
                     return str(val.date()) if hasattr(val, 'date') else str(val)
         except Exception as e:

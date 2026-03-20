@@ -75,6 +75,7 @@ indicators:
 ai:
   model: "claude-sonnet-4-20250514"
   chart_analysis_enabled: true
+  chart_cache_minutes: 15        # cache chart analysis results to reduce API calls
   confidence_threshold: 0.60     # min confidence to take a trade (was 0.45)
 
 # --- Schedule ---
@@ -115,6 +116,7 @@ agents:
   trade_review:
     enabled: true
     auto_apply_suggestions: false
+    batch_review_interval: 50    # only call Claude every N trades for strategic suggestions
 
 # --- Correlation Filter ---
 correlation:
