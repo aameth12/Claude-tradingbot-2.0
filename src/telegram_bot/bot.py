@@ -107,6 +107,10 @@ class TradingBot:
         if broker_connected:
             try:
                 account = await broker.get_account_pnl()
+            except Exception:
+                account = {}
+
+            if account and account.get('NetLiquidation', 0) > 0:
                 msg += (
                     f"\nAccount\n"
                     f"{'-'*30}\n"
@@ -114,26 +118,45 @@ class TradingBot:
                     f"Cash: ${account.get('TotalCashValue', 0):,.2f}\n"
                     f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
                 )
-            except Exception:
-                msg += "\nAccount: (IBKR data unavailable)\n"
+            else:
+                msg += "\nAccount: (Waiting for IBKR data...)\n"
         else:
             msg += "\nAccount: (IBKR disconnected)\n"
 
-        # --- Today's P&L (from IBKR — resets daily) ---
-        if account:
+        # --- Today's P&L (combined IBKR + DB) ---
+        msg += (
+            f"\nToday\n"
+            f"{'-'*30}\n"
+        )
+        if account and account.get('NetLiquidation', 0) > 0:
             realized = account.get('RealizedPnL', 0)
             unrealized = account.get('UnrealizedPnL', 0)
             msg += (
-                f"\nToday's P&L\n"
-                f"{'-'*30}\n"
-                f"Realized: ${realized:+,.2f}\n"
-                f"Unrealized: ${unrealized:+,.2f}\n"
-                f"Total: ${realized + unrealized:+,.2f}\n"
+                f"IBKR Realized: ${realized:+,.2f}\n"
+                f"IBKR Unrealized: ${unrealized:+,.2f}\n"
+                f"IBKR Net: ${realized + unrealized:+,.2f}\n"
             )
 
-        # --- All-time stats (from bot DB) ---
         session = get_session()
         try:
+            today_str = date.today().isoformat()
+            today_closed = session.query(Trade).filter(
+                Trade.status == "CLOSED",
+                Trade.exit_time >= today_str,
+            ).all()
+            if today_closed:
+                day_winners = [t for t in today_closed if (t.pnl or 0) > 0]
+                day_pnl = sum(t.pnl or 0 for t in today_closed)
+                day_win_rate = len(day_winners) / len(today_closed) * 100
+                msg += (
+                    f"Bot Trades: {len(today_closed)}"
+                    f" | Win Rate: {day_win_rate:.1f}%\n"
+                    f"Bot P&L: ${day_pnl:+,.2f}\n"
+                )
+            else:
+                msg += f"No bot trades closed today.\n"
+
+            # --- All-time stats (from bot DB) ---
             all_closed = session.query(Trade).filter(Trade.status == "CLOSED").all()
             if all_closed:
                 total_pnl = sum(t.pnl or 0 for t in all_closed)
@@ -241,8 +264,8 @@ class TradingBot:
                         f"  Win Rate Target: {today_targets['win_rate_target']:.1f}%\n"
                         f"  P&L Target: {today_targets['pnl_pct_target']:+.2f}%\n"
                     )
-                if today_targets.get("streak", 0) > 0:
-                    targets_msg += f"  Streak: {today_targets['streak']} day(s)\n"
+                streak = today_targets.get("streak", 0)
+                targets_msg += f"  Streak: {streak} day(s)\n"
                 msg += targets_msg
             except Exception:
                 pass
