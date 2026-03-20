@@ -563,6 +563,112 @@ class TradingEngine:
 
         return "TRAILING_STOP"
 
+    async def reconcile_with_broker(self) -> dict:
+        """Reconcile bot's DB with IBKR's actual state.
+
+        Detects trades that IBKR closed but the bot missed,
+        and IBKR positions the bot doesn't track.
+        """
+        result = {
+            "closed_count": 0,
+            "orphan_count": 0,
+            "closed_trades": [],
+            "orphans": [],
+        }
+
+        if not self.broker.connected:
+            logger.warning("Cannot reconcile: broker not connected")
+            return result
+
+        session = get_session()
+        try:
+            # Get IBKR's actual portfolio
+            portfolio = await self.broker.get_portfolio()
+            ibkr_symbols = {p["symbol"] for p in portfolio if p["position"] != 0}
+
+            # Get bot's open trades
+            open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
+            db_symbols = {t.symbol for t in open_trades}
+
+            # 1. Find trades the bot thinks are open but IBKR doesn't have
+            for trade in open_trades:
+                if trade.symbol not in ibkr_symbols:
+                    logger.info(
+                        "Reconciliation: %s %s is OPEN in DB but not in IBKR portfolio",
+                        trade.side, trade.symbol,
+                    )
+
+                    # Try to get the actual exit price from executions
+                    exit_price = None
+                    try:
+                        executions = await self.broker.get_executions(trade.symbol)
+                        exit_side = "SLD" if trade.side == "LONG" else "BOT"
+                        exit_fills = [
+                            e for e in executions
+                            if e["side"] == exit_side
+                            and e["time"] >= trade.entry_time
+                        ]
+                        if exit_fills:
+                            exit_price = exit_fills[-1]["price"]
+                    except Exception as e:
+                        logger.warning("Could not get executions for %s: %s", trade.symbol, e)
+
+                    # Fallback to market data
+                    if not exit_price:
+                        try:
+                            market_data = await self.broker.get_market_data(trade.symbol)
+                            exit_price = market_data.get("last") or market_data.get("close")
+                        except Exception:
+                            pass
+
+                    # Last fallback to yfinance
+                    if not exit_price:
+                        exit_price = self.tv_analyzer.get_current_price(trade.symbol)
+
+                    if not exit_price:
+                        exit_price = trade.entry_price  # Absolute last resort
+
+                    exit_reason = self._infer_exit_reason(trade, exit_price)
+                    await self._close_trade(trade, exit_price, exit_reason, session)
+
+                    result["closed_count"] += 1
+                    result["closed_trades"].append({
+                        "symbol": trade.symbol,
+                        "side": trade.side,
+                        "entry_price": trade.entry_price,
+                        "exit_price": exit_price,
+                        "pnl": trade.pnl,
+                    })
+
+            # 2. Find IBKR positions the bot doesn't track
+            for symbol in ibkr_symbols:
+                if symbol not in db_symbols:
+                    pos = next(p for p in portfolio if p["symbol"] == symbol)
+                    result["orphan_count"] += 1
+                    result["orphans"].append({
+                        "symbol": symbol,
+                        "position": pos["position"],
+                        "market_price": pos["market_price"],
+                        "unrealized_pnl": pos["unrealized_pnl"],
+                    })
+                    logger.warning(
+                        "Reconciliation: %s is in IBKR but not tracked by bot (%s shares)",
+                        symbol, pos["position"],
+                    )
+
+            if result["closed_count"] or result["orphan_count"]:
+                logger.info(
+                    "Reconciliation complete: %d trades closed, %d orphan positions",
+                    result["closed_count"], result["orphan_count"],
+                )
+            else:
+                logger.info("Reconciliation: DB and IBKR are in sync")
+
+        finally:
+            session.close()
+
+        return result
+
     async def generate_daily_summary(self):
         """Generate and store daily trading summary."""
         session = get_session()

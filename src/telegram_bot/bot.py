@@ -64,6 +64,7 @@ class TradingBot:
             "/review [ID] - Trade review (last trade if no ID)\n"
             "/accuracy - Indicator accuracy stats\n"
             "/targets - Daily performance targets & history\n"
+            "/sync - Sync DB with IBKR (detect missed trades)\n"
             "/version - Version info & changelog\n"
             "/help - Show this help"
         )
@@ -85,6 +86,23 @@ class TradingBot:
                 f"Bot Status\n"
                 f"{'='*30}\n"
                 f"Mode: {config['trading']['mode']}\n"
+            )
+
+            # Show IBKR account data if connected
+            broker = self.trading_engine.broker if self.trading_engine else None
+            if broker and broker.connected:
+                try:
+                    account = await broker.get_account_pnl()
+                    msg += (
+                        f"Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
+                        f"Unrealized P&L: ${account.get('UnrealizedPnL', 0):+,.2f}\n"
+                        f"Realized P&L: ${account.get('RealizedPnL', 0):+,.2f}\n"
+                        f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
+                    )
+                except Exception:
+                    pass
+
+            msg += (
                 f"Open Positions: {len(open_trades)}/{config['trading']['max_open_positions']}\n"
                 f"Today's Trades: {len(today_closed)}/{config['trading']['max_daily_trades']}\n"
                 f"Watchlist: {', '.join(config['watchlist'])}\n"
@@ -93,15 +111,36 @@ class TradingBot:
             if open_trades:
                 msg += f"\nOpen Positions:\n"
                 total_unrealized = 0
+
+                # Build price lookup from IBKR portfolio (one call for all positions)
+                portfolio_lookup = {}
+                if broker and broker.connected:
+                    try:
+                        portfolio = await broker.get_portfolio()
+                        for p in portfolio:
+                            portfolio_lookup[p["symbol"]] = p
+                    except Exception:
+                        pass
+
                 for t in open_trades:
-                    # Fetch current price from broker, fallback to yfinance
                     current_price = None
-                    if self.trading_engine and self.trading_engine.broker:
+                    ibkr_pnl = None
+
+                    # Use IBKR portfolio data (preferred — one call, accurate P&L)
+                    if t.symbol in portfolio_lookup:
+                        p = portfolio_lookup[t.symbol]
+                        current_price = p["market_price"]
+                        ibkr_pnl = p["unrealized_pnl"]
+
+                    # Fallback to individual market data
+                    if not current_price and broker and broker.connected:
                         try:
-                            market_data = await self.trading_engine.broker.get_market_data(t.symbol)
+                            market_data = await broker.get_market_data(t.symbol)
                             current_price = market_data.get("last") or market_data.get("close")
                         except Exception:
                             pass
+
+                    # Fallback to yfinance
                     if not current_price and self.trading_engine:
                         try:
                             current_price = self.trading_engine.tv_analyzer.get_current_price(t.symbol)
@@ -109,7 +148,10 @@ class TradingBot:
                             pass
 
                     if current_price:
-                        if t.side == "LONG":
+                        # Use IBKR P&L if available, otherwise calculate
+                        if ibkr_pnl is not None:
+                            pnl = ibkr_pnl
+                        elif t.side == "LONG":
                             pnl = (current_price - t.entry_price) * t.quantity
                         else:
                             pnl = (t.entry_price - current_price) * t.quantity
@@ -160,6 +202,20 @@ class TradingBot:
                 for t in trades:
                     emoji = "+" if (t.pnl or 0) > 0 else ""
                     msg += f"  {t.side} {t.symbol}: ${t.pnl or 0:{emoji},.2f}\n"
+
+            # Show IBKR's actual account P&L
+            broker = self.trading_engine.broker if self.trading_engine else None
+            if broker and broker.connected:
+                try:
+                    account = await broker.get_account_pnl()
+                    msg += (
+                        f"\nIBKR Account P&L:\n"
+                        f"  Realized: ${account.get('RealizedPnL', 0):+,.2f}\n"
+                        f"  Unrealized: ${account.get('UnrealizedPnL', 0):+,.2f}\n"
+                        f"  Net Liquidation: ${account.get('NetLiquidation', 0):,.2f}\n"
+                    )
+                except Exception:
+                    pass
 
             await update.message.reply_text(msg)
         finally:
@@ -661,6 +717,55 @@ class TradingBot:
 
         await update.message.reply_text(msg)
 
+    async def sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reconcile bot's database with IBKR's actual state."""
+        if not self._is_authorized(update):
+            return
+        if not self.trading_engine:
+            await update.message.reply_text("Trading engine not initialized.")
+            return
+        if not self.trading_engine.broker.connected:
+            await update.message.reply_text("Broker not connected.")
+            return
+
+        await update.message.reply_text("Syncing with IBKR...")
+        try:
+            result = await self.trading_engine.reconcile_with_broker()
+            msg = (
+                f"IBKR Sync Complete\n"
+                f"{'='*30}\n"
+                f"Trades closed by IBKR: {result['closed_count']}\n"
+                f"Untracked IBKR positions: {result['orphan_count']}\n"
+            )
+            if result["closed_trades"]:
+                msg += "\nReconciled Trades:\n"
+                for t in result["closed_trades"]:
+                    msg += f"  {t['side']} {t['symbol']}: ${t['pnl'] or 0:+,.2f}\n"
+            if result["orphans"]:
+                msg += "\nUntracked IBKR Positions:\n"
+                for o in result["orphans"]:
+                    msg += (
+                        f"  {o['symbol']}: {o['position']:.0f} shares"
+                        f" | P&L: ${o['unrealized_pnl']:+,.2f}\n"
+                    )
+
+            # Append current account state
+            try:
+                account = await self.trading_engine.broker.get_account_pnl()
+                msg += (
+                    f"\nIBKR Account:\n"
+                    f"  Balance: ${account.get('NetLiquidation', 0):,.2f}\n"
+                    f"  Unrealized P&L: ${account.get('UnrealizedPnL', 0):+,.2f}\n"
+                    f"  Realized P&L: ${account.get('RealizedPnL', 0):+,.2f}\n"
+                    f"  Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
+                )
+            except Exception:
+                pass
+
+            await update.message.reply_text(msg)
+        except Exception as e:
+            await update.message.reply_text(f"Sync failed: {e}")
+
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self.start(update, context)
 
@@ -688,6 +793,7 @@ class TradingBot:
         self.app.add_handler(CommandHandler("review", self.review_cmd))
         self.app.add_handler(CommandHandler("accuracy", self.accuracy_cmd))
         self.app.add_handler(CommandHandler("targets", self.targets))
+        self.app.add_handler(CommandHandler("sync", self.sync))
         self.app.add_handler(CommandHandler("help", self.help_cmd))
 
         return self.app

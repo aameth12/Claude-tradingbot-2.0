@@ -67,6 +67,17 @@ async def run_bot():
         logger.error("Failed to connect to broker: %s", e)
         logger.info("Bot will run in analysis-only mode (no order execution)")
 
+    # Reconcile DB with IBKR state on startup
+    try:
+        result = await engine.reconcile_with_broker()
+        if result["closed_count"] or result["orphan_count"]:
+            logger.info(
+                "Startup reconciliation: %d trades closed, %d orphan positions",
+                result["closed_count"], result["orphan_count"],
+            )
+    except Exception as e:
+        logger.warning("Startup reconciliation failed (OK if broker not connected): %s", e)
+
     # Start the engine
     engine.start()
 
@@ -126,6 +137,19 @@ async def run_bot():
         ),
         id="check_closed",
         name="Check Closed Positions",
+    )
+
+    # Reconcile with IBKR every 5 minutes (catches trades IBKR closed that we missed)
+    scheduler.add_job(
+        engine.reconcile_with_broker,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour="9-16",
+            minute="*/5",
+            timezone=config["schedule"]["timezone"],
+        ),
+        id="reconcile_broker",
+        name="Reconcile with IBKR",
     )
 
     # Daily summary at market close

@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
-from ib_insync import IB, Stock, MarketOrder, LimitOrder, StopOrder, Contract, Order, Trade as IBTrade
+from ib_insync import IB, Stock, MarketOrder, LimitOrder, StopOrder, Contract, Order, Trade as IBTrade, ExecutionFilter
 from src.utils.logger import setup_logger
 from src.utils.config import IB_HOST, IB_PORT, IB_CLIENT_ID, get_config
 
@@ -364,6 +364,27 @@ class IBKRClient:
             for pos in positions
         ]
 
+    async def get_portfolio(self) -> list[dict]:
+        """Get portfolio positions with IBKR-provided P&L and market data.
+
+        Uses ib.portfolio() which returns richer data than ib.positions(),
+        including marketPrice, marketValue, unrealizedPNL, and realizedPNL.
+        """
+        self._ensure_connected()
+        portfolio = self.ib.portfolio()
+        return [
+            {
+                "symbol": item.contract.symbol,
+                "position": item.position,
+                "market_price": item.marketPrice,
+                "market_value": item.marketValue,
+                "average_cost": item.averageCost,
+                "unrealized_pnl": item.unrealizedPNL,
+                "realized_pnl": item.realizedPNL,
+            }
+            for item in portfolio
+        ]
+
     async def get_account_summary(self) -> dict:
         self._ensure_connected()
         summary = self.ib.accountSummary()
@@ -371,6 +392,53 @@ class IBKRClient:
         for item in summary:
             result[item.tag] = item.value
         return result
+
+    async def get_account_pnl(self) -> dict:
+        """Get account-level balance and P&L from IBKR."""
+        self._ensure_connected()
+        summary = self.ib.accountSummary()
+        tags_of_interest = {
+            "NetLiquidation", "TotalCashValue", "UnrealizedPnL",
+            "RealizedPnL", "BuyingPower", "GrossPositionValue",
+        }
+        result = {}
+        for item in summary:
+            if item.tag in tags_of_interest:
+                try:
+                    result[item.tag] = float(item.value)
+                except (ValueError, TypeError):
+                    result[item.tag] = 0.0
+        return result
+
+    async def get_executions(self, symbol: str = "") -> list[dict]:
+        """Get execution reports (survives reconnections unlike fills()).
+
+        Args:
+            symbol: Filter by symbol (empty = all symbols).
+        """
+        self._ensure_connected()
+        exec_filter = ExecutionFilter()
+        if symbol:
+            exec_filter.symbol = symbol
+
+        # Request fresh executions from TWS
+        trades = await self.ib.reqExecutionsAsync(exec_filter)
+
+        results = []
+        for fill in self.ib.fills():
+            if symbol and fill.contract.symbol != symbol:
+                continue
+            results.append({
+                "symbol": fill.contract.symbol,
+                "exec_id": fill.execution.execId,
+                "time": fill.execution.time,
+                "side": fill.execution.side,
+                "price": fill.execution.avgPrice,
+                "quantity": fill.execution.shares,
+                "order_id": fill.execution.orderId,
+                "commission": fill.commissionReport.commission if fill.commissionReport else 0,
+            })
+        return results
 
     async def get_open_orders(self) -> list[dict]:
         self._ensure_connected()
