@@ -32,6 +32,7 @@ from apscheduler.triggers.cron import CronTrigger
 from src.utils.config import get_config, TRADING_MODE
 from src.utils.database import init_db
 from src.utils.logger import setup_logger
+from src.utils.version import get_version_string, get_latest_changelog
 from src.strategy.trading_engine import TradingEngine
 from src.telegram_bot.bot import TradingBot
 from src.backtest.backtester import Backtester
@@ -162,11 +163,14 @@ async def run_bot():
         startup_msg = (
             f"AI Trading Bot STARTED\n"
             f"{'='*30}\n"
+            f"{get_version_string()}\n"
+            f"{'='*30}\n"
             f"Mode: {TRADING_MODE}\n"
             f"Watchlist: {', '.join(config['watchlist'])}\n"
             f"Max Positions: {config['trading']['max_open_positions']}\n"
             f"Scan Interval: {scan_interval}min\n"
-            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"What's New:\n{get_latest_changelog()}"
         )
         try:
             await telegram_bot.send_notification(startup_msg)

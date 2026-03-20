@@ -18,6 +18,7 @@ from src.utils.logger import setup_logger
 from src.utils.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, get_config
 from src.utils.database import get_session, Trade, DailySummary, BacktestResult
 from src.backtest.backtester import Backtester
+from src.utils.version import VERSION, VERSION_NAME, CHANGELOG, get_version_string
 
 logger = setup_logger("telegram")
 
@@ -56,6 +57,7 @@ class TradingBot:
             "/stopbot - Stop trading\n"
             "/update - Git pull & restart bot\n"
             "/performance - Overall performance stats\n"
+            "/version - Version info & changelog\n"
             "/help - Show this help"
         )
         await update.message.reply_text(msg)
@@ -437,6 +439,21 @@ class TradingBot:
         # Restart the bot process
         os.execv(sys.executable, [sys.executable, "main.py"])
 
+    async def version(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show current version and recent changelog."""
+        if not self._is_authorized(update):
+            return
+
+        msg = f"AI Trading Bot {get_version_string()}\n{'='*30}\n"
+
+        # Show last 3 versions
+        for entry in CHANGELOG[:3]:
+            msg += f"\nv{entry['version']} \"{entry['name']}\"\n"
+            for change in entry["changes"]:
+                msg += f"  - {change}\n"
+
+        await update.message.reply_text(msg)
+
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self.start(update, context)
 
@@ -458,6 +475,7 @@ class TradingBot:
         self.app.add_handler(CommandHandler("startbot", self.startbot))
         self.app.add_handler(CommandHandler("stopbot", self.stopbot))
         self.app.add_handler(CommandHandler("update", self.update))
+        self.app.add_handler(CommandHandler("version", self.version))
         self.app.add_handler(CommandHandler("help", self.help_cmd))
 
         return self.app
