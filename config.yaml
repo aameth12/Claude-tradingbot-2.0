@@ -121,7 +121,7 @@ agents:
 # --- Correlation Filter ---
 correlation:
   enabled: true
-  max_correlation: 0.75
+  max_correlation: 0.85
   max_sector_positions: 5
   sectors:
     tech:

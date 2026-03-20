@@ -66,10 +66,10 @@ class IBKRClient:
 
         contract = self.create_stock_contract(symbol)
         try:
-            await self.ib.qualifyContractsAsync(contract)
-        except RuntimeError as e:
-            # "event loop already running" - proceed without qualification
-            # (works for well-known US stocks on SMART exchange)
+            qualified = await self.ib.qualifyContractsAsync(contract)
+            if not qualified or not qualified[0].conId:
+                logger.warning("Contract qualification returned no conId for %s", symbol)
+        except Exception as e:
             logger.warning("Contract qualification fallback for %s: %s", symbol, e)
 
         self._qualified_contracts[symbol] = contract
@@ -78,9 +78,14 @@ class IBKRClient:
     async def get_market_data(self, symbol: str) -> dict:
         self._ensure_connected()
         contract = await self._get_qualified_contract(symbol)
-        ticker = self.ib.reqMktData(contract, genericTickList="", snapshot=True)
-        await asyncio.sleep(1)  # wait for data (reduced from 2s)
-        self.ib.cancelMktData(contract)
+        try:
+            ticker = self.ib.reqMktData(contract, genericTickList="", snapshot=True)
+            await asyncio.sleep(1)  # wait for data (reduced from 2s)
+            self.ib.cancelMktData(contract)
+        except Exception as e:
+            logger.warning("Market data request failed for %s: %s", symbol, e)
+            return {"symbol": symbol, "bid": None, "ask": None, "last": None,
+                    "volume": None, "high": None, "low": None, "close": None}
 
         # Use last price, fallback to close, then bid/ask midpoint
         last = ticker.last

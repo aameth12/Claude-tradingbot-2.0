@@ -72,7 +72,7 @@ class CorrelationFilter:
             df = yf.Ticker(symbol).history(period="30d")
             if df.empty or len(df) < 10:
                 return None
-            returns = df["Close"].pct_change().dropna()
+            returns = df["Close"].pct_change(fill_method=None).dropna()
             returns.name = symbol
             self._returns_cache[symbol] = returns
             return returns
