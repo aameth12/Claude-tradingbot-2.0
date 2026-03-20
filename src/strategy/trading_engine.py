@@ -8,7 +8,7 @@ import pandas as pd
 
 from src.broker.ibkr_client import IBKRClient
 from src.analysis.tradingview_data import TradingViewAnalyzer
-from src.analysis.chart_analyzer import ChartAnalyzer
+from src.analysis.pattern_analyzer import PatternAnalyzer
 from src.strategy.signal_combiner import SignalCombiner, TradeSignal
 from src.risk.risk_manager import RiskManager
 from src.risk.correlation_filter import CorrelationFilter
@@ -26,7 +26,7 @@ class TradingEngine:
     def __init__(self):
         self.broker = IBKRClient()
         self.tv_analyzer = TradingViewAnalyzer()
-        self.chart_analyzer = ChartAnalyzer()
+        self.pattern_analyzer = PatternAnalyzer()
         self.signal_combiner = SignalCombiner()
         self.risk_manager = RiskManager()
         self.correlation_filter = CorrelationFilter()
@@ -193,23 +193,19 @@ class TradingEngine:
             logger.warning("Missing ATR or price for %s", symbol)
             return None
 
-        # 5. AI chart analysis (if enabled and during market hours)
+        # 5. Local pattern analysis (candlestick patterns, S/R, trend — no API call)
         ai_analysis = {"recommendation": "NEUTRAL", "confidence": 0.0, "reasoning": "Disabled"}
-        if self.config["ai"]["chart_analysis_enabled"] and self._is_market_hours():
+        if self.config["ai"].get("chart_analysis_enabled", True):
             try:
-                # Get historical bars from broker for chart generation
+                # Get historical bars from broker for pattern analysis
                 bars = await self.broker.get_historical_bars(
                     symbol, duration="5 D", bar_size="5 mins"
                 )
                 if bars:
                     df = pd.DataFrame(bars)
-                    # Run sync AI analysis in executor to avoid event loop conflicts
-                    loop = asyncio.get_event_loop()
-                    ai_analysis = await loop.run_in_executor(
-                        None, self.chart_analyzer.analyze_from_data, df, symbol, "5m"
-                    )
+                    ai_analysis = self.pattern_analyzer.analyze(df, symbol, "5m")
             except Exception as e:
-                logger.warning("AI chart analysis skipped for %s: %s", symbol, e)
+                logger.warning("Pattern analysis skipped for %s: %s", symbol, e)
 
         # 6. Determine signal direction from all sources FIRST
         regime_confidence = None
