@@ -4,6 +4,7 @@ from typing import Optional
 
 from src.utils.logger import setup_logger
 from src.utils.config import get_config
+from src.utils.database import get_session, IndicatorAccuracy
 
 logger = setup_logger("strategy")
 
@@ -49,6 +50,62 @@ class SignalCombiner:
                 "multi_timeframe": 0.35,
             }
 
+    def _get_adaptive_weights(self) -> dict:
+        """Adjust signal weights based on indicator accuracy from DB.
+
+        Falls back to static weights if not enough accuracy data exists.
+        """
+        session = get_session()
+        try:
+            records = session.query(IndicatorAccuracy).all()
+            if not records or len(records) < 5:
+                return self.weights  # Not enough data yet
+
+            accuracy_map = {r.indicator_name: r.accuracy_pct for r in records}
+
+            # Map indicator names to signal source categories
+            source_keywords = {
+                "tradingview_summary": "tradingview_summary",
+                "tradingview_indicators": "tradingview_indicators",
+                "ai_chart": "ai_chart",
+                "multi_timeframe": "multi_timeframe",
+                "sentiment": "sentiment",
+            }
+
+            source_accuracy = {}
+            for source in self.weights:
+                keyword = source_keywords.get(source, source)
+                related = [v for k, v in accuracy_map.items() if keyword in k]
+                if related:
+                    source_accuracy[source] = sum(related) / len(related)
+                else:
+                    source_accuracy[source] = 50.0  # Neutral default
+
+            # Re-weight: higher accuracy → higher weight, normalized to sum=1.0
+            total = sum(source_accuracy.values())
+            if total <= 0:
+                return self.weights
+
+            adaptive = {k: round(v / total, 3) for k, v in source_accuracy.items()}
+            logger.info("Adaptive weights: %s", adaptive)
+            return adaptive
+        except Exception as e:
+            logger.warning("Failed to get adaptive weights: %s, using static", e)
+            return self.weights
+        finally:
+            session.close()
+
+    def _get_regime_filters(self, regime: str | None) -> tuple[float, float]:
+        """Get ADX and volume filter thresholds based on market regime."""
+        if regime == "TRENDING":
+            return 20, 0.9   # Strict: need real trends with volume
+        elif regime == "RANGING":
+            return 10, 0.6   # Loose: allow mean-reversion in quiet markets
+        elif regime == "VOLATILE":
+            return 15, 1.0   # Need volume confirmation in volatility
+        else:
+            return 15, 0.8   # Default
+
     def evaluate_direction(
         self,
         symbol: str,
@@ -58,29 +115,32 @@ class SignalCombiner:
         multi_tf_analyses: dict,
         sentiment_score: float = 0.0,
         confidence_threshold_override: float | None = None,
+        regime: str | None = None,
     ) -> Optional[dict]:
         """Determine signal direction and confidence from all sources.
 
         Returns a dict with 'side', 'confidence', 'scores', 'reasoning'
         or None if no actionable signal.
         """
-        # Pre-filters: reject trades in trendless or low-volume conditions
+        # Pre-filters: regime-aware thresholds
         indicators = tv_analysis.get("indicators", {})
+        adx_min, vol_min = self._get_regime_filters(regime)
 
         # ADX filter — no trend = no trade
         adx = indicators.get("adx")
-        if adx is not None and adx < 15:
-            logger.info("%s: ADX %.1f too low (< 15), no trend", symbol, adx)
+        if adx is not None and adx < adx_min:
+            logger.info("%s: ADX %.1f too low (< %.0f, regime=%s), no trend",
+                        symbol, adx, adx_min, regime or "default")
             return None
 
         # Volume filter — weak volume = unreliable signal
         volume = indicators.get("volume")
         volume_sma = indicators.get("volume_sma20")
         if volume is not None and volume_sma is not None and volume_sma > 0:
-            if volume < volume_sma * 0.8:
+            if volume < volume_sma * vol_min:
                 logger.info(
-                    "%s: Volume %.0f below 0.8x SMA20 (%.0f), skipping",
-                    symbol, volume, volume_sma,
+                    "%s: Volume %.0f below %.1fx SMA20 (%.0f), skipping (regime=%s)",
+                    symbol, volume, vol_min, volume_sma, regime or "default",
                 )
                 return None
 
@@ -106,16 +166,17 @@ class SignalCombiner:
         if "sentiment" in self.weights:
             scores["sentiment"] = max(-1.0, min(1.0, sentiment_score))
 
-        # Use adjusted weights if AI analysis is unavailable (error or empty)
+        # Use adaptive weights (accuracy-driven) or fall back to static
+        base_weights = self._get_adaptive_weights()
+
+        # Adjust weights if AI analysis is unavailable
         ai_available = ai_analysis and "error" not in ai_analysis and ai_analysis.get("recommendation", "NEUTRAL") != "NEUTRAL"
         if ai_available:
-            weights = self.weights
+            weights = base_weights
         else:
-            # Redistribute AI weight to other sources
-            ai_w = self.weights.get("ai_chart", 0.15)
-            weights = dict(self.weights)
+            ai_w = base_weights.get("ai_chart", 0.15)
+            weights = dict(base_weights)
             weights["ai_chart"] = 0.0
-            # Distribute AI weight proportionally to remaining sources
             remaining_keys = [k for k in weights if k != "ai_chart" and weights[k] > 0]
             if remaining_keys:
                 bonus = ai_w / len(remaining_keys)
@@ -126,6 +187,19 @@ class SignalCombiner:
         combined_score = sum(
             scores[key] * weights[key] for key in scores
         )
+
+        # Signal convergence bonus — reward when multiple sources agree
+        bullish_sources = sum(1 for s in scores.values() if s > 0.05)
+        bearish_sources = sum(1 for s in scores.values() if s < -0.05)
+        total_sources = len(scores)
+        agreement = max(bullish_sources, bearish_sources) / total_sources if total_sources > 0 else 0
+
+        if agreement >= 0.75:
+            convergence_bonus = 1.0 + (agreement - 0.5) * 0.6  # 1.15 to 1.30
+            combined_score *= convergence_bonus
+            logger.info("%s: Convergence bonus %.0f%% (%d/%d sources agree)",
+                        symbol, (convergence_bonus - 1) * 100,
+                        max(bullish_sources, bearish_sources), total_sources)
 
         # Determine side
         if combined_score > 0:
@@ -143,13 +217,12 @@ class SignalCombiner:
             return None
 
         # AI veto — soft penalty instead of hard block
-        # Only apply penalty when AI has a confident opposing opinion (not just neutral/uncertain)
         ai_confidence = ai_analysis.get("confidence", 0.0)
         if side == "LONG" and ai_analysis.get("long_opportunity") is False and ai_confidence > 0.3:
-            combined_score *= 0.6  # reduce by 40% instead of blocking
+            combined_score *= 0.6
             logger.info("%s: AI discourages LONG (confidence %.2f), reducing score", symbol, ai_confidence)
         elif side == "SHORT" and ai_analysis.get("short_opportunity") is False and ai_confidence > 0.3:
-            combined_score *= 0.6  # reduce by 40% instead of blocking
+            combined_score *= 0.6
             logger.info("%s: AI discourages SHORT (confidence %.2f), reducing score", symbol, ai_confidence)
 
         confidence = min(abs(combined_score), 1.0)

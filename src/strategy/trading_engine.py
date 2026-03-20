@@ -211,8 +211,10 @@ class TradingEngine:
 
         # 6. Determine signal direction from all sources FIRST
         regime_confidence = None
+        regime_name = None
         if self._current_regime:
             regime_confidence = self._current_regime.recommended_confidence_threshold
+            regime_name = self._current_regime.regime
 
         direction = self.signal_combiner.evaluate_direction(
             symbol=symbol,
@@ -222,6 +224,7 @@ class TradingEngine:
             multi_tf_analyses=multi_tf,
             sentiment_score=sentiment_score,
             confidence_threshold_override=regime_confidence,
+            regime=regime_name,
         )
 
         if not direction:
