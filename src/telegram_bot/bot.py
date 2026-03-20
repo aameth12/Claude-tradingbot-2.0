@@ -119,9 +119,9 @@ class TradingBot:
                     f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
                 )
             else:
-                msg += "\nAccount: (Waiting for IBKR data...)\n"
+                msg += "\nAccount: (IBKR connected but no data yet — retry in a moment)\n"
         else:
-            msg += "\nAccount: (IBKR disconnected)\n"
+            msg += "\nAccount: (IBKR not connected — restart bot with IB Gateway running)\n"
 
         # --- Today's P&L (combined IBKR + DB) ---
         msg += (
