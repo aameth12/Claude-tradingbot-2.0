@@ -13,7 +13,7 @@ from src.strategy.signal_combiner import SignalCombiner, TradeSignal
 from src.risk.risk_manager import RiskManager
 from src.risk.correlation_filter import CorrelationFilter
 from src.agents.agent_manager import AgentManager
-from src.utils.database import get_session, Trade, DailySummary, init_db
+from src.utils.database import get_session, Trade, DailySummary, IndicatorAccuracy, init_db
 from src.utils.performance_tracker import PerformanceTracker
 from src.utils.logger import setup_logger
 from src.utils.config import get_config
@@ -566,5 +566,147 @@ class TradingEngine:
             except Exception as e:
                 logger.error("Performance target evaluation failed: %s", e)
 
+            # Generate AI improvement suggestions
+            try:
+                await self._generate_eod_suggestions(session, trades, today_str)
+            except Exception as e:
+                logger.error("EOD suggestions failed: %s", e)
+
         finally:
             session.close()
+
+    async def _generate_eod_suggestions(self, session, today_trades, today_str):
+        """Generate end-of-day AI suggestions for bot improvement."""
+        if not self.telegram_bot:
+            return
+
+        # Gather data for analysis
+        # 1. Today's closed trades with details
+        trade_details = []
+        for t in today_trades:
+            signals = {}
+            try:
+                signals = json.loads(t.signals or "{}")
+            except (json.JSONDecodeError, TypeError):
+                pass
+            trade_details.append({
+                "symbol": t.symbol,
+                "side": t.side,
+                "entry": t.entry_price,
+                "exit": t.exit_price,
+                "pnl": t.pnl,
+                "pnl_pct": t.pnl_pct,
+                "exit_reason": t.exit_reason,
+                "signals": signals,
+            })
+
+        # 2. Open positions still held
+        open_trades = session.query(Trade).filter(Trade.status == "OPEN").all()
+        open_details = []
+        for t in open_trades:
+            open_details.append({
+                "symbol": t.symbol,
+                "side": t.side,
+                "entry": t.entry_price,
+                "stop_loss": t.stop_loss,
+                "take_profit": t.take_profit,
+                "entry_time": str(t.entry_time),
+            })
+
+        # 3. Indicator accuracy stats
+        accuracy_records = session.query(IndicatorAccuracy).all()
+        accuracy_stats = [
+            {"name": r.indicator_name, "accuracy": r.accuracy_pct,
+             "correct": r.correct_signals, "total": r.total_signals}
+            for r in accuracy_records
+        ]
+
+        # 4. Recent daily summaries for trend context
+        recent_summaries = session.query(DailySummary).order_by(
+            DailySummary.date.desc()
+        ).limit(5).all()
+        summary_history = [
+            {"date": s.date, "trades": s.total_trades, "win_rate": s.win_rate,
+             "pnl": s.total_pnl}
+            for s in recent_summaries
+        ]
+
+        # 5. Current config parameters
+        config = self.config
+        params = {
+            "confidence_threshold": config["ai"]["confidence_threshold"],
+            "max_open_positions": config["trading"]["max_open_positions"],
+            "max_daily_trades": config["trading"]["max_daily_trades"],
+            "risk_per_trade_pct": config["trading"]["risk_per_trade_pct"],
+            "weights": {
+                "tradingview_summary": 0.25,
+                "tradingview_indicators": 0.25,
+                "ai_chart": 0.15,
+                "multi_timeframe": 0.35,
+            },
+            "volume_filter": "0.8x SMA20",
+            "adx_min": 15,
+        }
+
+        system_prompt = (
+            "You are a trading bot performance analyst. Analyze today's trading session "
+            "and provide specific, actionable suggestions to improve the bot's code and parameters. "
+            "The user will copy-paste your suggestions to a developer to implement.\n\n"
+            "Focus on:\n"
+            "1. Parameter adjustments (confidence threshold, signal weights, risk per trade, SL/TP ratios)\n"
+            "2. Filter improvements (volume filter, ADX threshold, correlation limits)\n"
+            "3. Strategy observations (which indicators are working/failing, pattern recognition issues)\n"
+            "4. Risk management (position sizing, trailing stop behavior, drawdown patterns)\n"
+            "5. Any code changes that could improve performance\n\n"
+            "Be specific with numbers. Say 'change confidence_threshold from 0.55 to 0.50' not 'lower the threshold'.\n"
+            "If there were no trades, focus on why (filters too strict?) and suggest loosening specific parameters.\n\n"
+            "Respond with JSON: {\"suggestions\": [\"suggestion 1\", \"suggestion 2\", ...]}"
+        )
+
+        user_prompt = (
+            f"Date: {today_str}\n\n"
+            f"TODAY'S CLOSED TRADES ({len(trade_details)}):\n"
+            f"{json.dumps(trade_details, indent=2)}\n\n"
+            f"OPEN POSITIONS ({len(open_details)}):\n"
+            f"{json.dumps(open_details, indent=2)}\n\n"
+            f"INDICATOR ACCURACY (all-time):\n"
+            f"{json.dumps(accuracy_stats, indent=2)}\n\n"
+            f"RECENT DAILY SUMMARIES:\n"
+            f"{json.dumps(summary_history, indent=2)}\n\n"
+            f"CURRENT BOT PARAMETERS:\n"
+            f"{json.dumps(params, indent=2)}\n\n"
+            f"Provide 3-7 specific suggestions to improve the bot."
+        )
+
+        # Use the trade review agent's Claude access
+        review_agent = self.agent_manager.review_agent
+        result = review_agent._call_claude(system_prompt, user_prompt, max_tokens=1500)
+
+        if "error" in result:
+            logger.error("EOD suggestions Claude call failed: %s", result["error"])
+            return
+
+        # Format suggestions
+        suggestions = result.get("suggestions", [])
+        if isinstance(suggestions, list) and suggestions:
+            suggestions_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(suggestions))
+        else:
+            suggestions_text = json.dumps(result, indent=2)
+
+        msg = (
+            f"EOD IMPROVEMENT SUGGESTIONS\n"
+            f"{'='*30}\n"
+            f"{today_str} | {len(today_trades)} trades\n\n"
+            f"{suggestions_text}\n\n"
+            f"Copy these suggestions to Claude Code to implement them."
+        )
+
+        # Split long messages for Telegram (4096 char limit)
+        if len(msg) > 4000:
+            parts = [msg[i:i+4000] for i in range(0, len(msg), 4000)]
+            for part in parts:
+                await self.telegram_bot.send_notification(part)
+        else:
+            await self.telegram_bot.send_notification(msg)
+
+        logger.info("EOD suggestions sent via Telegram")
