@@ -19,6 +19,11 @@ import subprocess
 import sys
 from datetime import datetime
 
+# On Windows, ib_insync requires SelectorEventLoop (not ProactorEventLoop)
+# because it uses add_reader/add_writer which Proactor doesn't support.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 # ib_insync/eventkit requires an event loop to exist at import time.
 try:
     asyncio.get_running_loop()

@@ -30,21 +30,12 @@ class IBKRClient:
         """Attempt a single IB connection with the given client_id."""
         logger.info("Connecting to IB Gateway at %s:%s (clientId=%s)...", IB_HOST, IB_PORT, client_id)
         self.ib = IB()
-        # Use ib_insync's synchronous connect in a thread to avoid
-        # event-loop conflicts with connectAsync on Windows/proactor.
-        loop = asyncio.get_event_loop()
-        await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: self.ib.connect(
-                    host=IB_HOST,
-                    port=IB_PORT,
-                    clientId=client_id,
-                    timeout=timeout,
-                    readonly=self.config.get("readonly", False),
-                ),
-            ),
-            timeout=timeout + 5,  # extra margin over ib_insync's own timeout
+        await self.ib.connectAsync(
+            host=IB_HOST,
+            port=IB_PORT,
+            clientId=client_id,
+            timeout=timeout,
+            readonly=self.config.get("readonly", False),
         )
 
     async def connect(self):
