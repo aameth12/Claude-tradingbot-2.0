@@ -119,7 +119,9 @@ class TradingBot:
                     f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
                 )
             else:
-                msg += "\nAccount: (IBKR connected but no data yet — retry in a moment)\n"
+                # Show whatever tags we did get for debugging
+                tags = ", ".join(f"{k}={v}" for k, v in account.items()) if account else "none"
+                msg += f"\nAccount: (IBKR connected, waiting for data — tags: {tags})\n"
         else:
             msg += "\nAccount: (IBKR not connected — restart bot with IB Gateway running)\n"
 

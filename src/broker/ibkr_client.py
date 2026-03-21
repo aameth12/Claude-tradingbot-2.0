@@ -427,13 +427,25 @@ class IBKRClient:
                 self.ib.accountValues(), tags_of_interest, currency_filter=("USD", ""),
             )
 
-        # If still empty, do an async request to populate the cache
+        # If still empty, do async requests to populate the cache
         if not result or result.get("NetLiquidation", 0) == 0:
             try:
                 await self.ib.reqAccountSummaryAsync()
+                await asyncio.sleep(0.5)  # Give subscription time to deliver
                 result = self._parse_account_tags(self.ib.accountSummary(), tags_of_interest)
             except Exception as e:
                 logger.warning("reqAccountSummaryAsync failed: %s", e)
+
+        # Last resort: request account updates (different IBKR subscription path)
+        if not result or result.get("NetLiquidation", 0) == 0:
+            try:
+                await self.ib.reqAccountUpdatesAsync(self.ib.wrapper.accounts[0])
+                await asyncio.sleep(0.5)
+                result = self._parse_account_tags(
+                    self.ib.accountValues(), tags_of_interest, currency_filter=("USD", ""),
+                )
+            except Exception as e:
+                logger.warning("reqAccountUpdatesAsync failed: %s", e)
 
         return result
 
