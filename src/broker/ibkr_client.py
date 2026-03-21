@@ -39,7 +39,6 @@ class IBKRClient:
             )
             self.connected = True
             self.ib.reqMarketDataType(3)  # 3 = delayed
-            self.ib.reqAccountUpdates()
             logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
         except Exception as e:
             logger.error("Failed to connect to IB Gateway: %s", e)
@@ -414,11 +413,7 @@ class IBKRClient:
         return result
 
     async def get_account_pnl(self) -> dict:
-        """Get account-level balance and P&L from IBKR.
-
-        Tries accountSummary() first, falls back to accountValues()
-        which is auto-populated by reqAccountUpdates().
-        """
+        """Get account-level balance and P&L from IBKR."""
         self._ensure_connected()
         tags_of_interest = {
             "NetLiquidation", "TotalCashValue", "UnrealizedPnL",
@@ -426,7 +421,7 @@ class IBKRClient:
         }
         result = {}
 
-        # Try accountSummary first
+        # Try cached accountSummary first
         summary = self.ib.accountSummary()
         for item in summary:
             if item.tag in tags_of_interest:
@@ -435,7 +430,7 @@ class IBKRClient:
                 except (ValueError, TypeError):
                     result[item.tag] = 0.0
 
-        # Fall back to accountValues (populated by reqAccountUpdates)
+        # Try cached accountValues
         if not result or result.get("NetLiquidation", 0) == 0:
             values = self.ib.accountValues()
             for item in values:
@@ -444,6 +439,20 @@ class IBKRClient:
                         result[item.tag] = float(item.value)
                     except (ValueError, TypeError):
                         result[item.tag] = 0.0
+
+        # If still empty, do an async request to populate the cache
+        if not result or result.get("NetLiquidation", 0) == 0:
+            try:
+                await self.ib.reqAccountSummaryAsync()
+                summary = self.ib.accountSummary()
+                for item in summary:
+                    if item.tag in tags_of_interest:
+                        try:
+                            result[item.tag] = float(item.value)
+                        except (ValueError, TypeError):
+                            result[item.tag] = 0.0
+            except Exception as e:
+                logger.warning("reqAccountSummaryAsync failed: %s", e)
 
         return result
 
