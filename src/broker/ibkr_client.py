@@ -41,8 +41,8 @@ class IBKRClient:
             # Request account data so it's cached for dashboard
             try:
                 await self.ib.reqAccountSummaryAsync()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Initial account summary request failed: %s", e)
             logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
         except Exception as e:
             logger.error("Failed to connect to IB Gateway: %s", e)
@@ -388,6 +388,20 @@ class IBKRClient:
             for item in portfolio
         ]
 
+    @staticmethod
+    def _parse_account_tags(items, tags_of_interest, currency_filter=None):
+        """Parse account summary/values items into a dict of float values."""
+        result = {}
+        for item in items:
+            if item.tag in tags_of_interest:
+                if currency_filter and hasattr(item, 'currency') and item.currency not in currency_filter:
+                    continue
+                try:
+                    result[item.tag] = float(item.value)
+                except (ValueError, TypeError):
+                    result[item.tag] = 0.0
+        return result
+
     async def get_account_summary(self) -> dict:
         self._ensure_connected()
         summary = self.ib.accountSummary()
@@ -403,38 +417,21 @@ class IBKRClient:
             "NetLiquidation", "TotalCashValue", "UnrealizedPnL",
             "RealizedPnL", "BuyingPower", "GrossPositionValue",
         }
-        result = {}
 
         # Try cached accountSummary first
-        summary = self.ib.accountSummary()
-        for item in summary:
-            if item.tag in tags_of_interest:
-                try:
-                    result[item.tag] = float(item.value)
-                except (ValueError, TypeError):
-                    result[item.tag] = 0.0
+        result = self._parse_account_tags(self.ib.accountSummary(), tags_of_interest)
 
         # Try cached accountValues
         if not result or result.get("NetLiquidation", 0) == 0:
-            values = self.ib.accountValues()
-            for item in values:
-                if item.tag in tags_of_interest and item.currency in ("USD", ""):
-                    try:
-                        result[item.tag] = float(item.value)
-                    except (ValueError, TypeError):
-                        result[item.tag] = 0.0
+            result = self._parse_account_tags(
+                self.ib.accountValues(), tags_of_interest, currency_filter=("USD", ""),
+            )
 
         # If still empty, do an async request to populate the cache
         if not result or result.get("NetLiquidation", 0) == 0:
             try:
                 await self.ib.reqAccountSummaryAsync()
-                summary = self.ib.accountSummary()
-                for item in summary:
-                    if item.tag in tags_of_interest:
-                        try:
-                            result[item.tag] = float(item.value)
-                        except (ValueError, TypeError):
-                            result[item.tag] = 0.0
+                result = self._parse_account_tags(self.ib.accountSummary(), tags_of_interest)
             except Exception as e:
                 logger.warning("reqAccountSummaryAsync failed: %s", e)
 

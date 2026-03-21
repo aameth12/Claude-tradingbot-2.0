@@ -124,14 +124,11 @@ class TradingBot:
             msg += "\nAccount: (IBKR not connected — restart bot with IB Gateway running)\n"
 
         # --- Today's P&L (combined IBKR + DB) ---
-        msg += (
-            f"\nToday\n"
-            f"{'-'*30}\n"
-        )
+        today_content = ""
         if account and account.get('NetLiquidation', 0) > 0:
             realized = account.get('RealizedPnL', 0)
             unrealized = account.get('UnrealizedPnL', 0)
-            msg += (
+            today_content += (
                 f"IBKR Realized: ${realized:+,.2f}\n"
                 f"IBKR Unrealized: ${unrealized:+,.2f}\n"
                 f"IBKR Net: ${realized + unrealized:+,.2f}\n"
@@ -148,13 +145,16 @@ class TradingBot:
                 day_winners = [t for t in today_closed if (t.pnl or 0) > 0]
                 day_pnl = sum(t.pnl or 0 for t in today_closed)
                 day_win_rate = len(day_winners) / len(today_closed) * 100
-                msg += (
+                today_content += (
                     f"Bot Trades: {len(today_closed)}"
                     f" | Win Rate: {day_win_rate:.1f}%\n"
                     f"Bot P&L: ${day_pnl:+,.2f}\n"
                 )
+
+            if today_content:
+                msg += f"\nToday\n{'-'*30}\n" + today_content
             else:
-                msg += f"No bot trades closed today.\n"
+                msg += f"\nToday\n{'-'*30}\nNo activity today.\n"
 
             # --- All-time stats (from bot DB) ---
             all_closed = session.query(Trade).filter(Trade.status == "CLOSED").all()
@@ -515,6 +515,21 @@ class TradingBot:
             await update.message.reply_text(f"Git pull failed: {e}")
             return
 
+        # Install any new/updated dependencies
+        bot_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        try:
+            pip_result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q"],
+                capture_output=True, text=True, timeout=120,
+                cwd=bot_dir,
+            )
+            if pip_result.returncode != 0:
+                await update.message.reply_text(
+                    f"pip install warning:\n{pip_result.stderr[:500]}"
+                )
+        except Exception as e:
+            await update.message.reply_text(f"pip install failed: {e} — restarting anyway")
+
         await update.message.reply_text("Restarting bot...")
 
         # Clean up broker connection before restart
@@ -527,12 +542,15 @@ class TradingBot:
 
         # Spawn new process then exit — works on both Windows and Linux
         # os.execv doesn't fully replace the process on Windows
-        bot_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         subprocess.Popen(
             [sys.executable, "main.py"],
             cwd=bot_dir,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
+        # Flush log handlers before hard exit
+        import logging
+        for handler in logging.root.handlers:
+            handler.flush()
         os._exit(0)
 
     async def regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
