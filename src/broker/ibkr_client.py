@@ -31,11 +31,12 @@ class IBKRClient:
             return
         try:
             try:
+                logger.info("Connecting to IB Gateway at %s:%s (clientId=%s)...", IB_HOST, IB_PORT, IB_CLIENT_ID)
                 await self.ib.connectAsync(
                     host=IB_HOST,
                     port=IB_PORT,
                     clientId=IB_CLIENT_ID,
-                    timeout=self.config.get("timeout", 30),
+                    timeout=self.config.get("timeout", 15),
                     readonly=self.config.get("readonly", False),
                 )
             except ConnectionRefusedError:
@@ -52,7 +53,7 @@ class IBKRClient:
                         host=IB_HOST,
                         port=IB_PORT,
                         clientId=fallback_id,
-                        timeout=self.config.get("timeout", 30),
+                        timeout=self.config.get("timeout", 15),
                         readonly=self.config.get("readonly", False),
                     )
                 else:
