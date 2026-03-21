@@ -61,8 +61,12 @@ class IBKRClient:
                 accounts = self.ib.managedAccounts()
                 if accounts:
                     logger.info("Managed accounts: %s", accounts)
-                    await self.ib.reqAccountUpdatesAsync(accounts[0])
-                    await asyncio.sleep(2)  # Let subscription deliver data
+                    try:
+                        await asyncio.wait_for(
+                            self.ib.reqAccountUpdatesAsync(accounts[0]), timeout=10
+                        )
+                    except (asyncio.TimeoutError, TimeoutError):
+                        logger.warning("reqAccountUpdates timed out — will retry on dashboard request")
                 else:
                     logger.warning("No managed accounts found")
             except Exception as e:
@@ -458,8 +462,11 @@ class IBKRClient:
             accounts = self.ib.managedAccounts()
             if accounts:
                 try:
-                    await self.ib.reqAccountUpdatesAsync(accounts[0])
-                    await asyncio.sleep(1)
+                    await asyncio.wait_for(
+                        self.ib.reqAccountUpdatesAsync(accounts[0]), timeout=10
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    logger.warning("reqAccountUpdates timed out")
                 except Exception as e:
                     logger.warning("reqAccountUpdates failed: %s", e)
 
