@@ -26,50 +26,52 @@ class IBKRClient:
         self.config = get_config()["broker"]
         self._qualified_contracts: dict[str, Stock] = {}
 
+    async def _try_connect(self, client_id: int, timeout: int):
+        """Attempt a single IB connection with the given client_id."""
+        logger.info("Connecting to IB Gateway at %s:%s (clientId=%s)...", IB_HOST, IB_PORT, client_id)
+        self.ib = IB()
+        # Use ib_insync's synchronous connect in a thread to avoid
+        # event-loop conflicts with connectAsync on Windows/proactor.
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: self.ib.connect(
+                    host=IB_HOST,
+                    port=IB_PORT,
+                    clientId=client_id,
+                    timeout=timeout,
+                    readonly=self.config.get("readonly", False),
+                ),
+            ),
+            timeout=timeout + 5,  # extra margin over ib_insync's own timeout
+        )
+
     async def connect(self):
         if self.connected:
             return
         try:
             timeout = self.config.get("timeout", 15)
             try:
-                logger.info("Connecting to IB Gateway at %s:%s (clientId=%s)...", IB_HOST, IB_PORT, IB_CLIENT_ID)
-                await asyncio.wait_for(
-                    self.ib.connectAsync(
-                        host=IB_HOST,
-                        port=IB_PORT,
-                        clientId=IB_CLIENT_ID,
-                        timeout=timeout,
-                        readonly=self.config.get("readonly", False),
-                    ),
-                    timeout=timeout,
-                )
+                await self._try_connect(IB_CLIENT_ID, timeout)
             except ConnectionRefusedError:
                 raise
-            except (TimeoutError, asyncio.TimeoutError, Exception) as e:
+            except Exception as e:
                 if isinstance(e, ConnectionRefusedError):
                     raise
                 fallback_id = random.randint(10, 99)
                 logger.warning("Connection failed (%s), retrying with client ID %s", e, fallback_id)
-                # Create fresh IB instance — the old one is in a bad state
-                self.ib = IB()
-                await asyncio.wait_for(
-                    self.ib.connectAsync(
-                        host=IB_HOST,
-                        port=IB_PORT,
-                        clientId=fallback_id,
-                        timeout=timeout,
-                        readonly=self.config.get("readonly", False),
-                    ),
-                    timeout=timeout,
-                )
+                await self._try_connect(fallback_id, timeout)
             self.connected = True
             self.ib.reqMarketDataType(3)  # 3 = delayed
             # Request account data so it's cached for dashboard
             try:
-                await self.ib.reqAccountSummaryAsync()
+                await asyncio.wait_for(self.ib.reqAccountSummaryAsync(), timeout=10)
                 accounts = self.ib.wrapper.accounts
                 if accounts:
-                    await self.ib.reqAccountUpdatesAsync(accounts[0])
+                    await asyncio.wait_for(
+                        self.ib.reqAccountUpdatesAsync(accounts[0]), timeout=10
+                    )
                 await asyncio.sleep(1)  # Let subscriptions deliver data
             except Exception as e:
                 logger.warning("Initial account data request failed: %s", e)
