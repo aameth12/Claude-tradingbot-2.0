@@ -173,6 +173,6 @@ performance_targets:
 broker:
   host: "127.0.0.1"
   port: 4002                     # 4002 for IB Gateway paper, 4001 for live
-  client_id: 1
+  client_id: 2
   timeout: 30
   readonly: false

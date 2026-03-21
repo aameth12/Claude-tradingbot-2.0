@@ -30,34 +30,38 @@ class IBKRClient:
         if self.connected:
             return
         try:
+            timeout = self.config.get("timeout", 15)
             try:
                 logger.info("Connecting to IB Gateway at %s:%s (clientId=%s)...", IB_HOST, IB_PORT, IB_CLIENT_ID)
-                await self.ib.connectAsync(
-                    host=IB_HOST,
-                    port=IB_PORT,
-                    clientId=IB_CLIENT_ID,
-                    timeout=self.config.get("timeout", 15),
-                    readonly=self.config.get("readonly", False),
+                await asyncio.wait_for(
+                    self.ib.connectAsync(
+                        host=IB_HOST,
+                        port=IB_PORT,
+                        clientId=IB_CLIENT_ID,
+                        timeout=timeout,
+                        readonly=self.config.get("readonly", False),
+                    ),
+                    timeout=timeout,
                 )
             except ConnectionRefusedError:
                 raise
             except (TimeoutError, asyncio.TimeoutError, Exception) as e:
-                if (isinstance(e, (TimeoutError, asyncio.TimeoutError))
-                        or "already in use" in str(e).lower()
-                        or "clientid" in str(e).lower()):
-                    fallback_id = random.randint(10, 99)
-                    logger.warning("Connection failed (%s), retrying with client ID %s", e, fallback_id)
-                    # Create fresh IB instance — the old one is in a bad state
-                    self.ib = IB()
-                    await self.ib.connectAsync(
+                if isinstance(e, ConnectionRefusedError):
+                    raise
+                fallback_id = random.randint(10, 99)
+                logger.warning("Connection failed (%s), retrying with client ID %s", e, fallback_id)
+                # Create fresh IB instance — the old one is in a bad state
+                self.ib = IB()
+                await asyncio.wait_for(
+                    self.ib.connectAsync(
                         host=IB_HOST,
                         port=IB_PORT,
                         clientId=fallback_id,
-                        timeout=self.config.get("timeout", 15),
+                        timeout=timeout,
                         readonly=self.config.get("readonly", False),
-                    )
-                else:
-                    raise
+                    ),
+                    timeout=timeout,
+                )
             self.connected = True
             self.ib.reqMarketDataType(3)  # 3 = delayed
             # Request account data so it's cached for dashboard
