@@ -19,9 +19,6 @@ import subprocess
 import sys
 from datetime import datetime
 
-import nest_asyncio
-nest_asyncio.apply()
-
 # ib_insync/eventkit requires an event loop to exist at import time.
 try:
     asyncio.get_running_loop()

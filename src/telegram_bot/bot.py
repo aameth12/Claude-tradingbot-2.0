@@ -517,6 +517,14 @@ class TradingBot:
 
         await update.message.reply_text("Restarting bot...")
 
+        # Clean up broker connection before restart to avoid event loop conflicts
+        try:
+            if self.trading_engine:
+                self.trading_engine.stop()
+                self.trading_engine.broker.disconnect()
+        except Exception:
+            pass
+
         # Restart the bot process
         os.execv(sys.executable, [sys.executable, "main.py"])
 
