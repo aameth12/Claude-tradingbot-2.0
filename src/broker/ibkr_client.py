@@ -57,13 +57,14 @@ class IBKRClient:
             self.ib.reqMarketDataType(3)  # 3 = delayed
             # Request account data so it's cached for dashboard
             try:
-                await asyncio.wait_for(self.ib.reqAccountSummaryAsync(), timeout=10)
-                accounts = self.ib.wrapper.accounts
+                # Use managedAccounts from the connection handshake
+                accounts = self.ib.managedAccounts()
                 if accounts:
-                    await asyncio.wait_for(
-                        self.ib.reqAccountUpdatesAsync(accounts[0]), timeout=10
-                    )
-                await asyncio.sleep(1)  # Let subscriptions deliver data
+                    logger.info("Managed accounts: %s", accounts)
+                    await self.ib.reqAccountUpdatesAsync(accounts[0])
+                    await asyncio.sleep(2)  # Let subscription deliver data
+                else:
+                    logger.warning("No managed accounts found")
             except Exception as e:
                 logger.warning("Initial account data request failed: %s", e)
             logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
@@ -452,20 +453,22 @@ class IBKRClient:
                 self.ib.accountValues(), tags_of_interest, currency_filter=("USD", ""),
             )
 
-        # If cache empty, fire both subscription paths concurrently
+        # If cache empty, request fresh account updates
         if not self._has_account_data(result):
-            reqs = [self.ib.reqAccountSummaryAsync()]
-            accounts = self.ib.wrapper.accounts
+            accounts = self.ib.managedAccounts()
             if accounts:
-                reqs.append(self.ib.reqAccountUpdatesAsync(accounts[0]))
-            await asyncio.gather(*reqs, return_exceptions=True)
-            await asyncio.sleep(0.5)
+                try:
+                    await self.ib.reqAccountUpdatesAsync(accounts[0])
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logger.warning("reqAccountUpdates failed: %s", e)
 
-            result = self._parse_account_tags(self.ib.accountSummary(), tags_of_interest)
+            # Try accountValues first (populated by reqAccountUpdates)
+            result = self._parse_account_tags(
+                self.ib.accountValues(), tags_of_interest, currency_filter=("USD", ""),
+            )
             if not self._has_account_data(result):
-                result = self._parse_account_tags(
-                    self.ib.accountValues(), tags_of_interest, currency_filter=("USD", ""),
-                )
+                result = self._parse_account_tags(self.ib.accountSummary(), tags_of_interest)
 
         return result
 
