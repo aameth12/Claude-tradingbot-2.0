@@ -1,6 +1,7 @@
 import asyncio
 import math
 import json
+import random
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,13 +30,29 @@ class IBKRClient:
         if self.connected:
             return
         try:
-            await self.ib.connectAsync(
-                host=IB_HOST,
-                port=IB_PORT,
-                clientId=IB_CLIENT_ID,
-                timeout=self.config.get("timeout", 30),
-                readonly=self.config.get("readonly", False),
-            )
+            try:
+                await self.ib.connectAsync(
+                    host=IB_HOST,
+                    port=IB_PORT,
+                    clientId=IB_CLIENT_ID,
+                    timeout=self.config.get("timeout", 30),
+                    readonly=self.config.get("readonly", False),
+                )
+            except ConnectionRefusedError:
+                raise
+            except Exception as e:
+                if "already in use" in str(e).lower() or "clientid" in str(e).lower():
+                    fallback_id = random.randint(10, 99)
+                    logger.warning("Client ID %s in use, retrying with %s", IB_CLIENT_ID, fallback_id)
+                    await self.ib.connectAsync(
+                        host=IB_HOST,
+                        port=IB_PORT,
+                        clientId=fallback_id,
+                        timeout=self.config.get("timeout", 30),
+                        readonly=self.config.get("readonly", False),
+                    )
+                else:
+                    raise
             self.connected = True
             self.ib.reqMarketDataType(3)  # 3 = delayed
             # Request account data so it's cached for dashboard
