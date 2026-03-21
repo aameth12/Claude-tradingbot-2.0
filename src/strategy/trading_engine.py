@@ -24,8 +24,8 @@ logger = setup_logger("engine")
 class TradingEngine:
     """Main trading engine that orchestrates the full trading pipeline."""
 
-    def __init__(self):
-        self.broker = IBKRClient()
+    def __init__(self, broker=None):
+        self.broker = broker or IBKRClient()
         self.tv_analyzer = TradingViewAnalyzer()
         self.pattern_analyzer = PatternAnalyzer()
         self.signal_combiner = SignalCombiner()

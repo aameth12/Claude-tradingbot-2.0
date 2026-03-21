@@ -40,7 +40,7 @@ from src.backtest.backtester import Backtester
 logger = setup_logger("main")
 
 
-async def run_bot():
+async def run_bot(broker=None):
     """Run the full trading bot with all components."""
     config = get_config()
     logger.info("="*60)
@@ -52,19 +52,17 @@ async def run_bot():
     # Initialize database
     init_db()
 
-    # Initialize trading engine
-    engine = TradingEngine()
+    # Initialize trading engine (with pre-connected broker if available)
+    engine = TradingEngine(broker=broker)
 
     # Initialize Telegram bot
     telegram_bot = TradingBot(trading_engine=engine)
     telegram_app = telegram_bot.build_app()
     engine.set_telegram_bot(telegram_bot)
 
-    # Connect to broker
-    try:
-        await engine.connect()
-    except Exception as e:
-        logger.error("Failed to connect to broker: %s", e)
+    # Broker is connected synchronously before asyncio.run() — see main()
+    # If broker is not connected at this point, run in analysis-only mode
+    if not engine.broker.connected:
         logger.info("Bot will run in analysis-only mode (no order execution)")
 
     # Reconcile DB with IBKR state on startup
@@ -289,7 +287,16 @@ def main():
     elif args.backtest:
         run_backtest(args.backtest, args.period)
     else:
-        asyncio.run(run_bot())
+        # Connect broker synchronously BEFORE asyncio.run() to avoid
+        # "event loop already running" conflict with ib_insync
+        from src.broker.ibkr_client import IBKRClient
+        broker = IBKRClient()
+        try:
+            broker.connect_sync()
+            logger.info("Trading engine connected to broker")
+        except Exception as e:
+            logger.error("Failed to connect to broker: %s", e)
+        asyncio.run(run_bot(broker=broker))
 
 
 if __name__ == "__main__":
