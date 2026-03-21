@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from telegram.ext import (
 )
 
 from src.utils.logger import setup_logger
-from src.utils.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, get_config, save_config
+from src.utils.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, PROJECT_ROOT, get_config, save_config
 from src.utils.database import get_session, Trade
 from src.utils.performance_tracker import PerformanceTracker
 from src.backtest.backtester import Backtester
@@ -502,32 +503,34 @@ class TradingBot:
         if not self._is_authorized(update):
             return
 
+        bot_dir = str(PROJECT_ROOT)
         await update.message.reply_text("Pulling latest code...")
 
-        # Run git pull
+        # Run git pull (async to avoid blocking event loop)
         try:
-            result = subprocess.run(
-                ["git", "pull", "origin", "claude/ai-trading-bot-a1jC4"],
-                capture_output=True, text=True, timeout=30,
-                cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            proc = await asyncio.create_subprocess_exec(
+                "git", "pull", "origin", "claude/ai-trading-bot-a1jC4",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=bot_dir,
             )
-            git_output = result.stdout.strip() or result.stderr.strip()
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            git_output = (stdout or stderr or b"").decode().strip()
             await update.message.reply_text(f"Git pull:\n{git_output}")
         except Exception as e:
             await update.message.reply_text(f"Git pull failed: {e}")
             return
 
         # Install any new/updated dependencies
-        bot_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         try:
-            pip_result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q"],
-                capture_output=True, text=True, timeout=120,
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 cwd=bot_dir,
             )
-            if pip_result.returncode != 0:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            if proc.returncode != 0:
                 await update.message.reply_text(
-                    f"pip install warning:\n{pip_result.stderr[:500]}"
+                    f"pip install warning:\n{(stderr or b'').decode()[:500]}"
                 )
         except Exception as e:
             await update.message.reply_text(f"pip install failed: {e} — restarting anyway")
@@ -542,15 +545,12 @@ class TradingBot:
         except Exception:
             pass
 
-        # Spawn new process then exit — works on both Windows and Linux
-        # os.execv doesn't fully replace the process on Windows
+        # Spawn new process then exit
         subprocess.Popen(
             [sys.executable, "main.py"],
             cwd=bot_dir,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
-        # Flush log handlers before hard exit
-        import logging
         for handler in logging.root.handlers:
             handler.flush()
         os._exit(0)

@@ -41,8 +41,12 @@ class IBKRClient:
             # Request account data so it's cached for dashboard
             try:
                 await self.ib.reqAccountSummaryAsync()
+                accounts = self.ib.wrapper.accounts
+                if accounts:
+                    await self.ib.reqAccountUpdatesAsync(accounts[0])
+                await asyncio.sleep(1)  # Let subscriptions deliver data
             except Exception as e:
-                logger.warning("Initial account summary request failed: %s", e)
+                logger.warning("Initial account data request failed: %s", e)
             logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
         except Exception as e:
             logger.error("Failed to connect to IB Gateway: %s", e)
@@ -410,6 +414,10 @@ class IBKRClient:
             result[item.tag] = item.value
         return result
 
+    def _has_account_data(self, result: dict) -> bool:
+        """Check if result contains meaningful account data."""
+        return bool(result) and result.get("NetLiquidation", 0) > 0
+
     async def get_account_pnl(self) -> dict:
         """Get account-level balance and P&L from IBKR."""
         self._ensure_connected()
@@ -418,34 +426,27 @@ class IBKRClient:
             "RealizedPnL", "BuyingPower", "GrossPositionValue",
         }
 
-        # Try cached accountSummary first
+        # Try cached data first (no network calls)
         result = self._parse_account_tags(self.ib.accountSummary(), tags_of_interest)
-
-        # Try cached accountValues
-        if not result or result.get("NetLiquidation", 0) == 0:
+        if not self._has_account_data(result):
             result = self._parse_account_tags(
                 self.ib.accountValues(), tags_of_interest, currency_filter=("USD", ""),
             )
 
-        # If still empty, do async requests to populate the cache
-        if not result or result.get("NetLiquidation", 0) == 0:
-            try:
-                await self.ib.reqAccountSummaryAsync()
-                await asyncio.sleep(0.5)  # Give subscription time to deliver
-                result = self._parse_account_tags(self.ib.accountSummary(), tags_of_interest)
-            except Exception as e:
-                logger.warning("reqAccountSummaryAsync failed: %s", e)
+        # If cache empty, fire both subscription paths concurrently
+        if not self._has_account_data(result):
+            reqs = [self.ib.reqAccountSummaryAsync()]
+            accounts = self.ib.wrapper.accounts
+            if accounts:
+                reqs.append(self.ib.reqAccountUpdatesAsync(accounts[0]))
+            await asyncio.gather(*reqs, return_exceptions=True)
+            await asyncio.sleep(0.5)
 
-        # Last resort: request account updates (different IBKR subscription path)
-        if not result or result.get("NetLiquidation", 0) == 0:
-            try:
-                await self.ib.reqAccountUpdatesAsync(self.ib.wrapper.accounts[0])
-                await asyncio.sleep(0.5)
+            result = self._parse_account_tags(self.ib.accountSummary(), tags_of_interest)
+            if not self._has_account_data(result):
                 result = self._parse_account_tags(
                     self.ib.accountValues(), tags_of_interest, currency_filter=("USD", ""),
                 )
-            except Exception as e:
-                logger.warning("reqAccountUpdatesAsync failed: %s", e)
 
         return result
 
