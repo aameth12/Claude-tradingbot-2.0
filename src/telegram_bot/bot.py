@@ -506,31 +506,31 @@ class TradingBot:
         bot_dir = str(PROJECT_ROOT)
         await update.message.reply_text("Pulling latest code...")
 
-        # Run git pull (async to avoid blocking event loop)
+        # Run git pull in a thread (SelectorEventLoop on Windows doesn't support subprocesses)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "pull", "origin", "claude/ai-trading-bot-a1jC4",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                cwd=bot_dir,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-            git_output = (stdout or stderr or b"").decode().strip()
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, lambda: subprocess.run(
+                ["git", "pull", "origin", "claude/ai-trading-bot-a1jC4"],
+                capture_output=True, text=True, timeout=30, cwd=bot_dir,
+            ))
+            git_output = (result.stdout or result.stderr or "").strip()
             await update.message.reply_text(f"Git pull:\n{git_output}")
+            if result.returncode != 0:
+                await update.message.reply_text("Git pull failed (non-zero exit).")
+                return
         except Exception as e:
             await update.message.reply_text(f"Git pull failed: {e}")
             return
 
         # Install any new/updated dependencies
         try:
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                cwd=bot_dir,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-            if proc.returncode != 0:
+            result = await loop.run_in_executor(None, lambda: subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "-q"],
+                capture_output=True, text=True, timeout=120, cwd=bot_dir,
+            ))
+            if result.returncode != 0:
                 await update.message.reply_text(
-                    f"pip install warning:\n{(stderr or b'').decode()[:500]}"
+                    f"pip install warning:\n{(result.stderr or '')[:500]}"
                 )
         except Exception as e:
             await update.message.reply_text(f"pip install failed: {e} — restarting anyway")
