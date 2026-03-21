@@ -38,6 +38,11 @@ class IBKRClient:
             )
             self.connected = True
             self.ib.reqMarketDataType(3)  # 3 = delayed
+            # Request account data so it's cached for dashboard
+            try:
+                await self.ib.reqAccountSummaryAsync()
+            except Exception:
+                pass
             logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
         except Exception as e:
             logger.error("Failed to connect to IB Gateway: %s", e)

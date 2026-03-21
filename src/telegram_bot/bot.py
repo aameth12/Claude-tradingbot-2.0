@@ -517,7 +517,7 @@ class TradingBot:
 
         await update.message.reply_text("Restarting bot...")
 
-        # Clean up broker connection before restart to avoid event loop conflicts
+        # Clean up broker connection before restart
         try:
             if self.trading_engine:
                 self.trading_engine.stop()
@@ -525,8 +525,15 @@ class TradingBot:
         except Exception:
             pass
 
-        # Restart the bot process
-        os.execv(sys.executable, [sys.executable, "main.py"])
+        # Spawn new process then exit — works on both Windows and Linux
+        # os.execv doesn't fully replace the process on Windows
+        bot_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        subprocess.Popen(
+            [sys.executable, "main.py"],
+            cwd=bot_dir,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        )
+        os._exit(0)
 
     async def regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show current market regime."""
