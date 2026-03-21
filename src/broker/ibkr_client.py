@@ -40,10 +40,14 @@ class IBKRClient:
                 )
             except ConnectionRefusedError:
                 raise
-            except Exception as e:
-                if "already in use" in str(e).lower() or "clientid" in str(e).lower():
+            except (TimeoutError, asyncio.TimeoutError, Exception) as e:
+                if (isinstance(e, (TimeoutError, asyncio.TimeoutError))
+                        or "already in use" in str(e).lower()
+                        or "clientid" in str(e).lower()):
                     fallback_id = random.randint(10, 99)
-                    logger.warning("Client ID %s in use, retrying with %s", IB_CLIENT_ID, fallback_id)
+                    logger.warning("Connection failed (%s), retrying with client ID %s", e, fallback_id)
+                    # Create fresh IB instance — the old one is in a bad state
+                    self.ib = IB()
                     await self.ib.connectAsync(
                         host=IB_HOST,
                         port=IB_PORT,
