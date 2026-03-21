@@ -25,27 +25,7 @@ class IBKRClient:
         self.config = get_config()["broker"]
         self._qualified_contracts: dict[str, Stock] = {}
 
-    def connect_sync(self):
-        """Synchronous connect — must be called BEFORE asyncio.run()."""
-        if self.connected:
-            return
-        try:
-            self.ib.connect(
-                host=IB_HOST,
-                port=IB_PORT,
-                clientId=IB_CLIENT_ID,
-                timeout=self.config.get("timeout", 30),
-                readonly=self.config.get("readonly", False),
-            )
-            self.connected = True
-            self.ib.reqMarketDataType(3)  # 3 = delayed
-            logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
-        except Exception as e:
-            logger.error("Failed to connect to IB Gateway: %s", e)
-            raise
-
     async def connect(self):
-        """Async connect — wrapper for use inside async context."""
         if self.connected:
             return
         try:
@@ -58,7 +38,6 @@ class IBKRClient:
             )
             self.connected = True
             self.ib.reqMarketDataType(3)  # 3 = delayed
-            self.ib.reqAccountUpdates()
             logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
         except Exception as e:
             logger.error("Failed to connect to IB Gateway: %s", e)
