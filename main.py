@@ -198,6 +198,16 @@ async def run_bot():
         name="Refresh Earnings Calendar",
     )
 
+    # IBKR data collector — refreshes account/portfolio cache every 30s
+    if engine.broker.connected and engine.broker.data_collector:
+        scheduler.add_job(
+            engine.broker.data_collector.collect,
+            "interval",
+            seconds=30,
+            id="ibkr_data_collector",
+            name="IBKR Data Collector",
+        )
+
     scheduler.start()
     logger.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
 

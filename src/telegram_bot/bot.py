@@ -70,13 +70,14 @@ class TradingBot:
         await update.message.reply_text(msg)
 
     async def dashboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Comprehensive account dashboard — pulls data from IBKR directly."""
+        """Comprehensive account dashboard — reads from cached IBKR data (never hangs)."""
         if not self._is_authorized(update):
             return
 
         config = get_config()
         broker = self.trading_engine.broker if self.trading_engine else None
         broker_connected = broker and broker.connected
+        collector = broker.data_collector if broker else None
 
         # --- Header: Market status + bot mode ---
         market_line = ""
@@ -96,22 +97,20 @@ class TradingBot:
                     market_line += f"\nNext Open: {ms['next_open'].strftime('%a %b %d, %I:%M %p ET')}"
 
         engine_status = "RUNNING" if (self.trading_engine and self.trading_engine.running) else "STOPPED"
+        data_line = ""
+        if collector:
+            data_line = f" | Data: {collector.get_freshness()}"
         msg = (
             f"Dashboard\n"
             f"{'='*30}\n"
             f"{market_line}\n"
-            f"Mode: {config['trading']['mode']} | Engine: {engine_status}\n"
+            f"Mode: {config['trading']['mode']} | Engine: {engine_status}{data_line}\n"
         )
 
-        # --- Account section (from IBKR) ---
-        account = {}
-        if broker_connected:
-            try:
-                account = await broker.get_account_pnl()
-            except Exception:
-                account = {}
-
-            if account and account.get('NetLiquidation', 0) > 0:
+        # --- Account section (from cached IBKR data) ---
+        account = collector.account if collector else {}
+        if broker_connected and collector:
+            if collector.has_data():
                 msg += (
                     f"\nAccount\n"
                     f"{'-'*30}\n"
@@ -120,15 +119,15 @@ class TradingBot:
                     f"Buying Power: ${account.get('BuyingPower', 0):,.2f}\n"
                 )
             else:
-                # Show whatever tags we did get for debugging
-                tags = ", ".join(f"{k}={v}" for k, v in account.items()) if account else "none"
-                msg += f"\nAccount: (IBKR connected, waiting for data — tags: {tags})\n"
+                msg += f"\nAccount: (collecting data... updated {collector.get_freshness()})\n"
+        elif broker_connected:
+            msg += "\nAccount: (data collector initializing...)\n"
         else:
             msg += "\nAccount: (IBKR not connected — restart bot with IB Gateway running)\n"
 
         # --- Today's P&L (combined IBKR + DB) ---
         today_content = ""
-        if account and account.get('NetLiquidation', 0) > 0:
+        if collector and collector.has_data():
             realized = account.get('RealizedPnL', 0)
             unrealized = account.get('UnrealizedPnL', 0)
             today_content += (
@@ -178,14 +177,8 @@ class TradingBot:
                 if total_losses > 0:
                     msg += f"Profit Factor: {total_wins/total_losses:.2f}\n"
 
-            # --- Open positions (from IBKR portfolio) ---
-            portfolio = []
-            if broker_connected:
-                try:
-                    portfolio = await broker.get_portfolio()
-                    portfolio = [p for p in portfolio if p["position"] != 0]
-                except Exception:
-                    pass
+            # --- Open positions (from cached IBKR portfolio) ---
+            portfolio = collector.portfolio if collector else []
 
             if portfolio:
                 total_unrealized = sum(p["unrealized_pnl"] for p in portfolio)
@@ -217,34 +210,43 @@ class TradingBot:
                 else:
                     msg += "\nNo open positions.\n"
 
+            # --- Open orders (from cached IBKR data) ---
+            orders = collector.open_orders if collector else []
+            if orders:
+                msg += (
+                    f"\nOpen Orders ({len(orders)})\n"
+                    f"{'-'*30}\n"
+                )
+                for o in orders:
+                    price_str = ""
+                    if o["order_type"] == "LMT":
+                        price_str = f" @ ${o['limit_price']:.2f}"
+                    elif o["order_type"] in ("STP", "TRAIL"):
+                        price_str = f" @ ${o['aux_price']:.2f}"
+                    msg += (
+                        f"  {o['action']} {o['symbol']} x{int(o['quantity'])}"
+                        f" {o['order_type']}{price_str} [{o['status']}]\n"
+                    )
+
             # Split message if too long for Telegram (4096 char limit)
             if len(msg) > 3800:
                 await update.message.reply_text(msg)
                 msg = ""
 
-            # --- Today's executions (from IBKR) ---
-            if broker_connected:
-                try:
-                    executions = await broker.get_executions()
-                    today_dt = datetime.utcnow().date()
-                    today_execs = [
-                        e for e in executions
-                        if hasattr(e["time"], "date") and e["time"].date() == today_dt
-                    ]
-                    if today_execs:
-                        exec_msg = (
-                            f"\nToday's Executions ({len(today_execs)})\n"
-                            f"{'-'*30}\n"
-                        )
-                        for e in today_execs[-10:]:  # Last 10
-                            time_str = e["time"].strftime("%H:%M") if hasattr(e["time"], "strftime") else ""
-                            exec_msg += (
-                                f"  {e['side']} {int(e['quantity'])} {e['symbol']}"
-                                f" @ ${e['price']:.2f} [{time_str}]\n"
-                            )
-                        msg += exec_msg
-                except Exception:
-                    pass
+            # --- Today's executions (from cached IBKR data) ---
+            today_execs = collector.executions if collector else []
+            if today_execs:
+                exec_msg = (
+                    f"\nToday's Executions ({len(today_execs)})\n"
+                    f"{'-'*30}\n"
+                )
+                for e in today_execs[-10:]:  # Last 10
+                    time_str = e["time"].strftime("%H:%M") if hasattr(e["time"], "strftime") else ""
+                    exec_msg += (
+                        f"  {e['side']} {int(e['quantity'])} {e['symbol']}"
+                        f" @ ${e['price']:.2f} [{time_str}]\n"
+                    )
+                msg += exec_msg
 
             # --- Performance targets ---
             try:

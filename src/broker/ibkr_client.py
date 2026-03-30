@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from ib_insync import IB, Stock, MarketOrder, LimitOrder, StopOrder, Contract, Order, Trade as IBTrade, ExecutionFilter
+from src.broker.data_collector import IBKRDataCollector
 from src.utils.logger import setup_logger
 from src.utils.config import IB_HOST, IB_PORT, IB_CLIENT_ID, get_config
 
@@ -25,6 +26,7 @@ class IBKRClient:
         self.connected = False
         self.config = get_config()["broker"]
         self._qualified_contracts: dict[str, Stock] = {}
+        self.data_collector: IBKRDataCollector | None = None
 
     async def _try_connect(self, client_id: int, timeout: int):
         """Attempt a single IB connection with the given client_id."""
@@ -55,22 +57,9 @@ class IBKRClient:
                 await self._try_connect(fallback_id, timeout)
             self.connected = True
             self.ib.reqMarketDataType(3)  # 3 = delayed
-            # Request account data so it's cached for dashboard
-            try:
-                # Use managedAccounts from the connection handshake
-                accounts = self.ib.managedAccounts()
-                if accounts:
-                    logger.info("Managed accounts: %s", accounts)
-                    try:
-                        await asyncio.wait_for(
-                            self.ib.reqAccountUpdatesAsync(accounts[0]), timeout=10
-                        )
-                    except (asyncio.TimeoutError, TimeoutError):
-                        logger.warning("reqAccountUpdates timed out — will retry on dashboard request")
-                else:
-                    logger.warning("No managed accounts found")
-            except Exception as e:
-                logger.warning("Initial account data request failed: %s", e)
+            # Start background data collector for dashboard
+            self.data_collector = IBKRDataCollector(self.ib)
+            await self.data_collector.start()
             logger.info("Connected to IB Gateway at %s:%s", IB_HOST, IB_PORT)
         except Exception as e:
             logger.error("Failed to connect to IB Gateway: %s", e)
