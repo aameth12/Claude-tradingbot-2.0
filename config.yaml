@@ -83,7 +83,7 @@ indicators:
 
 # --- AI Analysis ---
 ai:
-  model: "claude-sonnet-4-20250514"
+  model: "claude-sonnet-4-6"
   chart_analysis_enabled: true
   chart_cache_minutes: 15        # cache chart analysis results to reduce API calls
   confidence_threshold: 0.45     # min confidence to take a trade (lowered from 0.60 for more trades)

@@ -510,9 +510,15 @@ class TradingBot:
 
         # Run git pull in a thread (SelectorEventLoop on Windows doesn't support subprocesses)
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
+            # Detect current branch dynamically to avoid hardcoded branch name bugs
+            branch_result = await loop.run_in_executor(None, lambda: subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=10, cwd=bot_dir,
+            ))
+            branch = branch_result.stdout.strip() or "main"
             result = await loop.run_in_executor(None, lambda: subprocess.run(
-                ["git", "pull", "origin", "claude/ai-trading-bot-a1jC4"],
+                ["git", "pull", "origin", branch],
                 capture_output=True, text=True, timeout=30, cwd=bot_dir,
             ))
             git_output = (result.stdout or result.stderr or "").strip()

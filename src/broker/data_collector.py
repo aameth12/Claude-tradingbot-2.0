@@ -177,7 +177,7 @@ class IBKRDataCollector:
                 "exec_id": fill.execution.execId,
                 "time": exec_time,
                 "side": fill.execution.side,
-                "price": fill.execution.price,
+                "price": fill.execution.avgPrice,
                 "quantity": fill.execution.shares,
                 "order_id": fill.execution.orderId,
                 "commission": fill.commissionReport.commission

@@ -80,7 +80,7 @@ class NewsSentimentAgent(BaseAgent):
     async def _get_momentum_sentiment(self, symbol: str) -> float:
         """Derive sentiment score from 5-day price return. No API call needed."""
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             score = await loop.run_in_executor(None, self._fetch_momentum, symbol)
             return score
         except Exception as e:
@@ -103,7 +103,7 @@ class NewsSentimentAgent(BaseAgent):
         if self._earnings_cache_date == date.today() and self._earnings_cache:
             return
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         for symbol in watchlist:
             try:
                 ed = await loop.run_in_executor(None, self._fetch_earnings_date, symbol)
@@ -118,7 +118,7 @@ class NewsSentimentAgent(BaseAgent):
     async def _get_earnings_date(self, symbol: str) -> str | None:
         if symbol in self._earnings_cache:
             return self._earnings_cache[symbol]
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         ed = await loop.run_in_executor(None, self._fetch_earnings_date, symbol)
         self._earnings_cache[symbol] = ed
         return ed

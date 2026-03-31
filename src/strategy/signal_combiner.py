@@ -22,6 +22,7 @@ class TradeSignal:
     strategy: str
     signals_detail: dict
     reasoning: str
+    atr: float = 0.0  # ATR used for SL/TP calculation (for recalc after fill)
 
 
 class SignalCombiner:
@@ -254,6 +255,7 @@ class SignalCombiner:
         symbol: str,
         direction: dict,
         trade_levels: dict,
+        atr: float = 0.0,
     ) -> Optional[TradeSignal]:
         """Build a TradeSignal from a validated direction and matching trade levels."""
         if not trade_levels.get("valid"):
@@ -272,6 +274,7 @@ class SignalCombiner:
             strategy="combined_signal",
             signals_detail=direction["scores"],
             reasoning=direction["reasoning"],
+            atr=atr,
         )
 
         logger.info(

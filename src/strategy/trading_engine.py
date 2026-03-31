@@ -332,6 +332,7 @@ class TradingEngine:
             symbol=symbol,
             direction=direction,
             trade_levels=trade_levels,
+            atr=atr,
         )
 
         return signal
@@ -356,7 +357,8 @@ class TradingEngine:
             )
 
             # 2. Recalculate SL/TP from actual fill price (not stale analysis price)
-            atr = abs(signal.take_profit - signal.entry_price) / self.config["risk"]["take_profit"]["atr_multiplier"]
+            # Use ATR stored in signal (avoids wrong reconstruction when regime overrides multipliers)
+            atr = signal.atr if signal.atr > 0 else abs(signal.stop_loss - signal.entry_price) / self.config["risk"]["stop_loss"]["atr_multiplier"]
             trade_levels = self.risk_manager.get_trade_levels(
                 fill_price, atr, signal.side,
                 self._cached_portfolio_value or 100000,
@@ -674,10 +676,15 @@ class TradingEngine:
                     try:
                         executions = await self.broker.get_executions(trade.symbol)
                         exit_side = "SLD" if trade.side == "LONG" else "BOT"
+                        # Normalize timezones before comparison: strip tz if exec time is aware
+                        entry_dt = trade.entry_time
                         exit_fills = [
                             e for e in executions
                             if e["side"] == exit_side
-                            and e["time"] >= trade.entry_time
+                            and (
+                                (e["time"].replace(tzinfo=None) if hasattr(e["time"], "tzinfo") and e["time"].tzinfo else e["time"])
+                                >= entry_dt
+                            )
                         ]
                         if exit_fills:
                             exit_price = exit_fills[-1]["price"]

@@ -43,7 +43,7 @@ class MarketRegimeAgent(BaseAgent):
         if cached:
             return cached
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         data = await loop.run_in_executor(None, self._gather_market_data, watchlist or [])
 
         # Deterministic classification — no Claude API call needed
